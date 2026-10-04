@@ -10,8 +10,8 @@ volume = np.random.default_rng(0).integers(0, 256, (T, H, W, 3), np.uint8)
 
 
 def sweep(angle):
-    out_width, out_frames, slices = timeslice.y_rotation_slices(T, H, W, angle)
-    frames = np.stack(list(timeslice.render(volume, slices)))
+    out_width, out_frames, slices = timeslice.y_rotation_slices(T, W, angle)
+    frames = np.stack([timeslice.sample_columns(volume, t, x) for t, x in slices])
     assert frames.shape == (out_frames, H, out_width, 3)
     return frames
 
@@ -40,6 +40,21 @@ def test_tilted_plane_is_black_outside_the_cuboid():
     # The plane first touches the cuboid at one corner, so most of the first
     # output frame lies outside it.
     assert (frames[0] == 0).mean() > 0.5
+
+
+def test_general_sampler_matches_column_sampler():
+    _, _, slices = timeslice.y_rotation_slices(T, W, 30)
+    rows = np.arange(H)[:, None]
+    for t, x in slices:
+        assert np.array_equal(timeslice.sample(volume, t, rows, x),
+                              timeslice.sample_columns(volume, t, x))
+
+
+def test_general_sampler_blends_between_voxels():
+    # Halfway between two voxels along each axis is the mean of all eight.
+    point = timeslice.sample(volume, [[2.5]], [[1.5]], [[3.5]])
+    expected = volume[2:4, 1:3, 3:5].reshape(-1, 3).mean(axis=0)
+    assert np.allclose(point[0, 0], expected, atol=0.5)
 
 
 if __name__ == "__main__":

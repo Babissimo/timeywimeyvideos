@@ -9,12 +9,16 @@ the picture).
 
 ## Setup
 
-You need Python 3.9+ and [ffmpeg](https://ffmpeg.org/download.html) (which
+You need Python 3.10+ and [ffmpeg](https://ffmpeg.org/download.html) (which
 includes `ffprobe`) on your `PATH`.
 
 ```sh
 pip install -r requirements.txt
 ```
+
+The sampling loops are compiled by [numba](https://numba.pydata.org/) the first
+time they run, which takes several seconds. The compiled code is cached in
+`__pycache__/`, so later runs start straight away.
 
 ## Usage
 
@@ -64,10 +68,14 @@ enters and leaves a corner.
 
 `timeslice.py` is split so that new kinds of slices only need new coordinates:
 
-- `sample(volume, t, y, x)` reads the video at any (t, y, x) positions
-  (linearly interpolated, black outside the cuboid).
-- `y_rotation_slices(...)` generates those positions, one output frame at a
-  time, for the rotated plane.
-- `render(...)` and `main()` handle threading, decoding and encoding.
+- `sample(volume, t, y, x)` reads the video at any (t, y, x) positions, so it
+  works for any surface. Each point blends the 8 voxels around it, weighted
+  by closeness (linear interpolation); points outside the cuboid are black.
+- `sample_columns(volume, t, x)` is a faster version for slices made of whole
+  source columns, which is what a rotation about the y axis gives. It only
+  blends across x and t (4 voxels).
+- `y_rotation_slices(...)` generates the (t, x) position of every output
+  column, one output frame at a time, for the rotated plane.
+- `main()` handles decoding and encoding (via ffmpeg).
 
 Run the geometry checks with `python test_timeslice.py` (or `pytest`).

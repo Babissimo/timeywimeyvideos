@@ -21,15 +21,12 @@ outside the cuboid come out black.
 """
 
 import argparse
-import collections
-import itertools
 import json
-import os
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
+from numba import njit, prange
 
 
 def probe(path):
@@ -93,69 +90,92 @@ def open_writer(path, width, height, fps):
     return subprocess.Popen(cmd, stdin=subprocess.PIPE)
 
 
+# Sampling. Voxel centres sit at whole-number coordinates. A point between
+# voxels is a blend of its neighbours, each weighted by how close the point is
+# to it (linear interpolation). Points outside the cuboid come out black. The
+# loops are compiled by numba and spread across all CPU cores.
+
+@njit(cache=True)
+def _neighbours(coord, n):
+    """The voxel indices either side of coord along an axis of length n, and
+    how far coord is past the first (0 = on it, 0.999 = nearly on the second)."""
+    lo = int(np.floor(coord))
+    return max(lo, 0), min(lo + 1, n - 1), coord - lo
+
+
+@njit(parallel=True, cache=True)
+def _sample_points(volume, t, y, x, out):
+    n_t, n_y, n_x, n_c = volume.shape
+    for i in prange(out.shape[0]):
+        for j in range(out.shape[1]):
+            tt, yy, xx = t[i, j], y[i, j], x[i, j]
+            if not (-0.5 <= tt < n_t - 0.5 and -0.5 <= yy < n_y - 0.5
+                    and -0.5 <= xx < n_x - 0.5):
+                out[i, j, :] = 0
+                continue
+            t0, t1, ft = _neighbours(tt, n_t)
+            y0, y1, fy = _neighbours(yy, n_y)
+            x0, x1, fx = _neighbours(xx, n_x)
+            for c in range(n_c):
+                # Blend along x, then y, then t: 8 voxels in all.
+                v = (((volume[t0, y0, x0, c] * (1 - fx) + volume[t0, y0, x1, c] * fx) * (1 - fy)
+                      + (volume[t0, y1, x0, c] * (1 - fx) + volume[t0, y1, x1, c] * fx) * fy) * (1 - ft)
+                     + ((volume[t1, y0, x0, c] * (1 - fx) + volume[t1, y0, x1, c] * fx) * (1 - fy)
+                        + (volume[t1, y1, x0, c] * (1 - fx) + volume[t1, y1, x1, c] * fx) * fy) * ft)
+                out[i, j, c] = min(255, int(v + 0.5))
+
+
+@njit(parallel=True, cache=True)
+def _sample_columns(volume, t, x, out):
+    n_t, n_y, n_x, n_c = volume.shape
+    for row in prange(n_y):
+        for j in range(t.shape[0]):
+            tt, xx = t[j], x[j]
+            if not (-0.5 <= tt < n_t - 0.5 and -0.5 <= xx < n_x - 0.5):
+                out[row, j, :] = 0
+                continue
+            t0, t1, ft = _neighbours(tt, n_t)
+            x0, x1, fx = _neighbours(xx, n_x)
+            for c in range(n_c):
+                # Blend along x, then t: 4 voxels in all.
+                v = ((volume[t0, row, x0, c] * (1 - fx) + volume[t0, row, x1, c] * fx) * (1 - ft)
+                     + (volume[t1, row, x0, c] * (1 - fx) + volume[t1, row, x1, c] * fx) * ft)
+                out[row, j, c] = min(255, int(v + 0.5))
+
+
 def sample(volume, t, y, x):
-    """Sample a (T, H, W, C) volume at continuous voxel coordinates.
+    """Sample a (T, H, W, C) volume at any continuous (t, y, x) points.
 
-    t, y and x are arrays that broadcast together; voxel centres sit at whole
-    numbers. Float coordinates are linearly interpolated; integer coordinates
-    are read exactly. Points outside the cuboid come out black.
+    t, y and x broadcast together to the (height, width) of the output frame,
+    so any surface through the cuboid can be read this way.
     """
-    t, y, x = np.asarray(t), np.asarray(y), np.asarray(x)
-    shape = np.broadcast_shapes(t.shape, y.shape, x.shape)
-    inside = np.ones(shape, bool)
-
-    # For each axis, a list of (index, weight) neighbours to blend.
-    neighbours = []
-    for coord, n in zip((t, y, x), volume.shape[:3]):
-        inside &= (coord >= -0.5) & (coord < n - 0.5)
-        if np.issubdtype(coord.dtype, np.integer):
-            neighbours.append([(np.clip(coord, 0, n - 1), None)])
-            continue
-        lo = np.floor(coord)
-        frac = (coord - lo).astype(np.float32)
-        lo = lo.astype(np.intp)
-        if not frac.any():
-            neighbours.append([(np.clip(lo, 0, n - 1), None)])
-        else:
-            neighbours.append([(np.clip(lo, 0, n - 1), 1 - frac),
-                               (np.clip(lo + 1, 0, n - 1), frac)])
-
-    out = np.zeros(shape + volume.shape[3:], np.float32)
-    for (ti, tw), (yi, yw), (xi, xw) in itertools.product(*neighbours):
-        weight = np.ones((), np.float32)
-        for w in (tw, yw, xw):
-            if w is not None:
-                weight = weight * w
-        out += volume[ti, yi, xi] * weight[..., None]
-
-    out[~inside] = 0
-    return np.clip(out + 0.5, 0, 255).astype(np.uint8)
+    shape = np.broadcast_shapes(np.shape(t), np.shape(y), np.shape(x))
+    t, y, x = (np.broadcast_to(np.asarray(a, np.float64), shape) for a in (t, y, x))
+    out = np.empty(shape + volume.shape[3:], np.uint8)
+    _sample_points(volume, t, y, x, out)
+    return out
 
 
-def render(volume, slices):
-    """Sample each (t, y, x) slice in turn, yielding output frames in order.
+def sample_columns(volume, t, x):
+    """A faster sample() for slices built from whole source columns.
 
-    Frames are sampled on a few threads at once (numpy releases the GIL while
-    it works), keeping only a small queue of frames in flight.
+    Output column j is the full-height column of the input at time t[j] and
+    position x[j], so only x and t need blending (4 voxels, not 8). Slices that
+    only rotate about the y axis have this shape.
     """
-    workers = os.cpu_count() or 1
-    with ThreadPoolExecutor(workers) as pool:
-        pending = collections.deque()
-        for coords in slices:
-            pending.append(pool.submit(sample, volume, *coords))
-            if len(pending) >= 2 * workers:
-                yield pending.popleft().result()
-        while pending:
-            yield pending.popleft().result()
+    out = np.empty((volume.shape[1], len(t)) + volume.shape[3:], np.uint8)
+    _sample_columns(volume, np.asarray(t, np.float64), np.asarray(x, np.float64), out)
+    return out
 
 
-def y_rotation_slices(n_frames, height, width, angle):
+def y_rotation_slices(n_frames, width, angle):
     """Plan a sweep with the slicing plane rotated `angle` degrees about y.
 
-    Returns (out_width, out_frames, slices), where slices yields the (t, y, x)
-    coordinates of each output frame. The output frame is wide enough to hold
-    the plane's whole intersection with the cuboid, and the sweep runs from
-    where the plane first touches the cuboid to where it leaves.
+    Returns (out_width, out_frames, slices), where slices yields, for each
+    output frame, the (t, x) source position of every output column (for use
+    with sample_columns). The output frame is wide enough to hold the plane's
+    whole intersection with the cuboid, and the sweep runs from where the plane
+    first touches the cuboid to where it leaves.
     """
     theta = np.radians(angle)
     # Round so that 0, 90, 180... degrees land exactly on the voxel grid.
@@ -166,14 +186,13 @@ def y_rotation_slices(n_frames, height, width, angle):
 
     centre_x, centre_t = (width - 1) / 2, (n_frames - 1) / 2
     across = np.arange(out_width) - (out_width - 1) / 2  # position along the frame
-    y = np.arange(height)[:, None]
 
     def frames():
         for f in range(out_frames):
             depth = f - (out_frames - 1) / 2  # plane's distance from the centre
             x = centre_x + across * c - depth * s
             t = centre_t + across * s + depth * c
-            yield t[None, :], y, x[None, :]
+            yield t, x
 
     return out_width, out_frames, frames()
 
@@ -204,12 +223,12 @@ def main():
           f"({volume.nbytes / 1e9:.2f} GB in memory)")
 
     out_width, out_frames, slices = y_rotation_slices(
-        n_frames, height, width, args.angle)
+        n_frames, width, args.angle)
     print(f"Writing {out_frames} frames of {out_width}x{height} to {args.output}")
 
     writer = open_writer(args.output, out_width, height, args.fps or fps)
-    for i, frame in enumerate(render(volume, slices)):
-        writer.stdin.write(frame.tobytes())
+    for i, (t, x) in enumerate(slices):
+        writer.stdin.write(sample_columns(volume, t, x).tobytes())
         if i % 10 == 0 or i == out_frames - 1:
             print(f"\r  frame {i + 1}/{out_frames}", end="", flush=True)
     print()
