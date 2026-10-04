@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.gif
