@@ -33,6 +33,7 @@ import subprocess
 import sys
 import time
 from fractions import Fraction
+from typing import Callable, NamedTuple
 
 import numpy as np
 from numba import njit, prange
@@ -44,6 +45,10 @@ class DoesNotFit(ValueError):
     """The frame can't fit inside the video at the requested angle."""
 
 
+class VideoError(RuntimeError):
+    """ffmpeg couldn't read or write a video."""
+
+
 def probe(path):
     """Return (width, height, frame rate, duration in seconds or None)."""
     out = subprocess.run(
@@ -51,8 +56,10 @@ def probe(path):
          "-show_entries", "stream=width,height,r_frame_rate:stream_tags=rotate"
                           ":stream_side_data=rotation:format=duration",
          "-of", "json", path],
-        capture_output=True, text=True, check=True).stdout
-    info = json.loads(out)
+        capture_output=True, text=True)
+    info = json.loads(out.stdout or "{}")
+    if out.returncode != 0 or not info.get("streams"):
+        raise VideoError(f"can't read a video stream from {path}")
     stream = info["streams"][0]
     width, height = stream["width"], stream["height"]
 
@@ -67,6 +74,15 @@ def probe(path):
     duration = info.get("format", {}).get("duration")
     return (width, height, Fraction(stream["r_frame_rate"]),
             float(duration) if duration else None)
+
+
+def clip_seconds(length, start=None, duration=None):
+    """How many seconds of a video `length` seconds long (None if unknown)
+    are used when starting at `start` and keeping at most `duration`."""
+    seconds = None if length is None else max(length - (start or 0), 0)
+    if duration is not None:
+        seconds = duration if seconds is None else min(seconds, duration)
+    return seconds
 
 
 def _read_exactly(pipe, buffer):
@@ -109,10 +125,8 @@ def load_video(path, scale=1.0, time_scale=1.0, start=None, duration=None,
     # Read frames straight into one array sized from the expected frame
     # count, growing it if the estimate was short; this avoids holding two
     # copies of the video in memory.
-    seconds = None if length is None else length - (start or 0)
-    if duration is not None:
-        seconds = duration if seconds is None else min(seconds, duration)
-    capacity = 256 if seconds is None else int(max(seconds, 0) * rate * 1.05) + 2
+    seconds = clip_seconds(length, start, duration)
+    capacity = 256 if seconds is None else int(seconds * rate * 1.05) + 2
     volume = np.empty((capacity, height, width, 3), np.uint8)
     n = 0
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=0) as proc:
@@ -123,9 +137,9 @@ def load_video(path, scale=1.0, time_scale=1.0, start=None, duration=None,
                 break
             n += 1
     if proc.returncode != 0:
-        sys.exit(f"ffmpeg failed to decode {path}")
+        raise VideoError(f"ffmpeg failed to decode {path}")
     if n == 0:
-        sys.exit(f"no frames decoded from {path}")
+        raise VideoError(f"no frames decoded from {path}")
     return volume[:n], fps
 
 
@@ -226,9 +240,14 @@ def sample_columns(volume, t, x, nearest=False):
     return out
 
 
-# Slice planning. Each function returns (out_width, out_frames, slices), where
-# slices yields, for each output frame, the (t, x) source position of every
-# output column, for use with sample_columns.
+# Slice planning. Each function returns a Sweep: the output frame width, the
+# number of output frames, and at(f), which gives the (t, x) source position of
+# every column of output frame f, for use with sample_columns.
+
+class Sweep(NamedTuple):
+    width: int
+    frames: int
+    at: Callable[[int], tuple]
 
 def rotation_sweep(n_frames, width, angle, inside=False, motion="longest"):
     """Plan a sweep with the slicing plane rotated `angle` degrees about y.
@@ -287,14 +306,11 @@ def rotation_sweep(n_frames, width, angle, inside=False, motion="longest"):
     centre_x, centre_t = (width - 1) / 2, (n_frames - 1) / 2
     across = np.arange(out_width) - (out_width - 1) / 2  # position along the frame
 
-    def frames():
-        for f in range(out_frames):
-            step = f - (out_frames - 1) / 2  # distance moved from the centre
-            x = centre_x + step * dx + across * c
-            t = centre_t + step * dt + across * s
-            yield t, x
+    def at(f):
+        step = f - (out_frames - 1) / 2  # distance moved from the centre
+        return centre_t + step * dt + across * s, centre_x + step * dx + across * c
 
-    return out_width, out_frames, frames()
+    return Sweep(out_width, out_frames, at)
 
 
 def shear_sweep(n_frames, width, angle, inside=False):
@@ -328,11 +344,21 @@ def shear_sweep(n_frames, width, angle, inside=False):
 
     centre_t = (n_frames - 1) / 2
 
-    def frames():
-        for f in range(out_frames):
-            yield centre_t + (f - (out_frames - 1) / 2) + delay, x
+    def at(f):
+        return centre_t + (f - (out_frames - 1) / 2) + delay, x
 
-    return width, out_frames, frames()
+    return Sweep(width, out_frames, at)
+
+
+def plan_sweep(n_frames, width, slice="rotate", angle=45.0, inside=False,
+               motion=None):
+    """Plan a sweep of either kind. motion only applies to rotate with
+    inside, and defaults to "longest" there."""
+    if slice == "shear":
+        return shear_sweep(n_frames, width, angle, inside)
+    if slice == "rotate":
+        return rotation_sweep(n_frames, width, angle, inside, motion or "longest")
+    raise ValueError(f"unknown slice {slice!r}")
 
 
 def main():
@@ -379,24 +405,24 @@ def main():
 
     began = time.monotonic()
     shrink = PREVIEW_SCALE if args.preview else 1.0
-    volume, fps = load_video(args.input, args.scale * shrink, shrink,
-                             args.start, args.duration, fast=args.preview)
+    try:
+        volume, fps = load_video(args.input, args.scale * shrink, shrink,
+                                 args.start, args.duration, fast=args.preview)
+    except VideoError as err:
+        sys.exit(str(err))
     n_frames, height, width, _ = volume.shape
     print(f"Loaded {n_frames} frames of {width}x{height} "
           f"({volume.nbytes / 1e9:.2f} GB in memory)")
 
     try:
-        if args.slice == "shear":
-            plan = shear_sweep(n_frames, width, args.angle, args.inside)
-        else:
-            plan = rotation_sweep(n_frames, width, args.angle, args.inside,
-                                  args.motion or "longest")
+        sweep = plan_sweep(n_frames, width, args.slice, args.angle, args.inside,
+                           args.motion)
     except DoesNotFit as err:
         sys.exit(f"{err}\nUse a longer clip or a smaller angle, or drop --inside "
                  f"to sweep the whole plane with black edges.")
     except ValueError as err:
         sys.exit(str(err))
-    out_width, out_frames, slices = plan
+    out_width, out_frames = sweep.width, sweep.frames
 
     # A preview has fewer frames, so play it slower to keep the running time
     # of the full render.
@@ -408,8 +434,8 @@ def main():
                              preset="ultrafast")
     else:
         writer = open_writer(args.output, out_width, height, out_fps)
-    for i, (t, x) in enumerate(slices):
-        frame = sample_columns(volume, t, x, nearest=args.preview)
+    for i in range(out_frames):
+        frame = sample_columns(volume, *sweep.at(i), nearest=args.preview)
         writer.stdin.write(frame.tobytes())
         if i % 10 == 0 or i == out_frames - 1:
             print(f"\r  frame {i + 1}/{out_frames}", end="", flush=True)

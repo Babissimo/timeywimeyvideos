@@ -16,6 +16,8 @@ includes `ffprobe`) on your `PATH`.
 pip install -r requirements.txt
 ```
 
+(Flask is only needed for the web front end.)
+
 The sampling loops are compiled by [numba](https://numba.pydata.org/) the first
 time they run, which takes several seconds. The compiled code is cached in
 `__pycache__/`, so later runs start straight away.
@@ -54,6 +56,33 @@ frame rate, so it runs as long as the full render would.
 Note that `--scale` only resizes the frames and keeps every frame, so it
 changes the cuboid's shape: the same angle gives a different slice at a
 different `--scale`.
+
+## Web front end
+
+```sh
+python webapp.py --videos ~/Movies
+```
+
+then open <http://127.0.0.1:8000>. The page offers the videos in the folder
+you name (the top level only; `videos/` here by default) and any you upload,
+which are saved in `uploads/`.
+
+- **Live preview** plays the slice while you change the angle and other
+  options. It shows the same frames as `--preview` would render: the server
+  holds a half-size copy of the clip in memory and slices one frame per
+  request. Space plays and pauses; the arrow keys step a frame.
+- **Cuboid** draws the clip as a box (one unit per pixel or frame), with the
+  first frame at the front and time running back, the current output frame
+  drawn where it cuts through, and the region the sweep covers shaded on top.
+  Drag to turn it, scroll to zoom, or pick a view; **Top** is the x-t diagram
+  below.
+- **Render preview** and **Render full quality** run `timeslice.py` in a
+  separate process with the options on the page. Renders are saved in
+  `renders/` and can be watched and downloaded from the page.
+
+The live view refuses clips that would need more than 2 GB of memory at half
+size; set a duration or scale to use part of a long video. The server only
+listens on this machine unless you pass `--host`.
 
 ## How the angle works
 
@@ -130,8 +159,12 @@ direction would only change the speed.
 - `sample_columns(volume, t, x)` is a faster version for slices made of whole
   source columns, which is what any tilt about the y axis gives. It only
   blends across x and t (4 voxels), or copies the nearest one for previews.
-- `rotation_sweep(...)` and `shear_sweep(...)` generate the (t, x) position of
-  every output column, one output frame at a time.
+- `rotation_sweep(...)` and `shear_sweep(...)` plan a sweep: the output size,
+  and `at(f)`, the (t, x) position of every column of output frame f.
+- `plan_sweep(...)` picks between them.
 - `main()` handles decoding and encoding (via ffmpeg).
 
-Run the geometry checks with `python test_timeslice.py` (or `pytest`).
+`webapp.py` is the web server (Flask), and `web/` holds the page it serves.
+
+Run the geometry checks with `python test_timeslice.py`, and the server's with
+`python test_webapp.py` (or run both with `pytest`).

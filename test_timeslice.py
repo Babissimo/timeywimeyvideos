@@ -14,10 +14,15 @@ volume = rng.integers(0, 256, (T, H, W, 3), np.uint8)
 long_volume = rng.integers(0, 256, (13, 3, 5, 3), np.uint8)
 
 
-def render(vol, plan, nearest=False):
-    out_width, out_frames, slices = plan
-    frames = np.stack([timeslice.sample_columns(vol, t, x, nearest) for t, x in slices])
-    assert frames.shape == (out_frames, vol.shape[1], out_width, 3)
+def positions(sweep):
+    """The (t, x) columns of every output frame."""
+    return [sweep.at(f) for f in range(sweep.frames)]
+
+
+def render(vol, sweep, nearest=False):
+    frames = np.stack([timeslice.sample_columns(vol, t, x, nearest)
+                       for t, x in positions(sweep)])
+    assert frames.shape == (sweep.frames, vol.shape[1], sweep.width, 3)
     return frames
 
 
@@ -80,10 +85,10 @@ def test_inside_frames_never_leave_the_video():
     n_frames, width = len(long_volume), long_volume.shape[2]
     for angle in [10, 30, 60, 90, 135, -45]:
         for motion in ["perpendicular", "time", "longest"]:
-            out_width, _, slices = timeslice.rotation_sweep(
+            sweep = timeslice.rotation_sweep(
                 n_frames, width, angle, inside=True, motion=motion)
-            assert out_width == width
-            for t, x in slices:
+            assert sweep.width == width
+            for t, x in positions(sweep):
                 assert t.min() > -1e-9 and t.max() < n_frames - 1 + 1e-9
                 assert x.min() > -1e-9 and x.max() < width - 1 + 1e-9
 
@@ -92,7 +97,7 @@ def test_longest_motion_is_at_least_as_long_as_the_others():
     for angle in [5, 30, 60, 90]:
         lengths = {motion: timeslice.rotation_sweep(
                        len(long_volume), long_volume.shape[2], angle,
-                       inside=True, motion=motion)[1]
+                       inside=True, motion=motion).frames
                    for motion in ["perpendicular", "time", "longest"]}
         assert lengths["longest"] >= max(lengths.values()), (angle, lengths)
 
@@ -127,6 +132,14 @@ def test_shear_rejects_ninety_degrees():
     raises(ValueError, timeslice.shear_sweep, T, W, 90)
 
 
+def test_plan_sweep_picks_the_kind_of_slice():
+    assert np.array_equal(render(volume, timeslice.plan_sweep(T, W, "shear", 20)),
+                          shear(20))
+    assert np.array_equal(
+        render(long_volume, timeslice.plan_sweep(13, 5, "rotate", 30, True, "time")),
+        rotate(30, long_volume, inside=True, motion="time"))
+
+
 def test_nearest_copies_the_closest_voxel():
     frame = timeslice.sample_columns(volume, [2.4, 2.6], [3.6, 3.4], nearest=True)
     assert np.array_equal(frame[:, 0], volume[2, :, 4])
@@ -134,9 +147,8 @@ def test_nearest_copies_the_closest_voxel():
 
 
 def test_general_sampler_matches_column_sampler():
-    _, _, slices = timeslice.rotation_sweep(T, W, 30)
     rows = np.arange(H)[:, None]
-    for t, x in slices:
+    for t, x in positions(timeslice.rotation_sweep(T, W, 30)):
         assert np.array_equal(timeslice.sample(volume, t, rows, x),
                               timeslice.sample_columns(volume, t, x))
 

@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>timeywimey</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>timeywimey</h1>
+  <span class="muted">slicing through a video's space-time cuboid</span>
+</header>
+
+<main>
+  <aside>
+    <section class="card">
+      <h2>Source</h2>
+      <select id="source" aria-label="Video"></select>
+      <label class="drop" id="drop">
+        <input type="file" id="file" accept="video/*,.mkv,.mov">
+        <span>Upload a video, or drop one anywhere on the page</span>
+      </label>
+      <div class="bar" id="upload-bar" hidden><div></div></div>
+      <p class="note" id="source-info"></p>
+    </section>
+
+    <section class="card">
+      <h2>Slice</h2>
+      <div class="segmented" role="radiogroup" aria-label="Kind of slice">
+        <label><input type="radio" name="slice" value="rotate" checked><span>Rotate</span></label>
+        <label><input type="radio" name="slice" value="shear"><span>Shear</span></label>
+      </div>
+      <p class="note" id="slice-note"></p>
+
+      <div class="field">
+        <label for="angle">Angle about y</label>
+        <div class="angle">
+          <input type="range" id="angle-range" min="-180" max="180" step="0.5" value="45" aria-label="Angle">
+          <input type="number" id="angle" min="-180" max="180" step="0.5" value="45">
+          <span class="muted">°</span>
+        </div>
+      </div>
+
+      <label class="check">
+        <input type="checkbox" id="inside">
+        <span>Inside the video only<br><span class="note">Input's width, no black edges</span></span>
+      </label>
+
+      <div class="field" id="motion-field" hidden>
+        <label for="motion">Motion</label>
+        <select id="motion">
+          <option value="longest">Longest line that fits</option>
+          <option value="perpendicular">Perpendicular to the frame</option>
+          <option value="time">Straight through time</option>
+        </select>
+        <p class="note" id="motion-note"></p>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Render</h2>
+      <p class="note" id="estimate"></p>
+      <div class="buttons">
+        <button id="render-preview">Render preview</button>
+        <button id="render-full" class="primary">Render full quality</button>
+      </div>
+      <div id="job" hidden>
+        <div class="bar"><div id="job-bar"></div></div>
+        <p class="note" id="job-text"></p>
+        <button id="cancel" class="quiet">Cancel</button>
+      </div>
+    </section>
+    <section class="card">
+      <h2>Clip</h2>
+      <div class="pair">
+        <div class="field"><label for="start">Start (s)</label>
+          <input type="number" id="start" min="0" step="0.1" placeholder="0"></div>
+        <div class="field"><label for="duration">Duration (s)</label>
+          <input type="number" id="duration" min="0" step="0.1" placeholder="all"></div>
+        <div class="field"><label for="scale">Scale</label>
+          <input type="number" id="scale" min="0.05" step="0.05" value="1"></div>
+        <div class="field"><label for="fps">Output fps</label>
+          <input type="text" id="fps" placeholder="same" inputmode="decimal"></div>
+      </div>
+      <p class="note">Scale resizes frames but keeps every frame, so it changes the
+        cuboid's shape: the same angle gives a different slice.</p>
+    </section>
+
+  </aside>
+
+  <div id="views">
+    <section class="card">
+      <div class="head">
+        <h2>Live preview</h2>
+        <span class="note" id="live-info"></span>
+      </div>
+      <div class="stage">
+        <canvas id="live"></canvas>
+        <div class="overlay" id="live-message">
+          <p id="live-text">Pick a video, or upload one.</p>
+          <button id="live-action" hidden></button>
+        </div>
+      </div>
+      <div class="transport">
+        <button id="play" aria-label="Play" title="Play (space)">▶</button>
+        <input type="range" id="scrub" min="0" max="1000" value="500" aria-label="Position">
+        <span class="mono" id="frame-label"></span>
+      </div>
+      <p class="note">Half size in x, y and time, like a preview render. Space plays,
+        arrow keys step.</p>
+    </section>
+
+    <section class="card">
+      <div class="head">
+        <h2>Cuboid</h2>
+        <div class="views" role="group" aria-label="View">
+          <button data-view="three">3/4</button>
+          <button data-view="front">Front</button>
+          <button data-view="top">Top</button>
+          <button data-view="side">Side</button>
+        </div>
+      </div>
+      <div class="stage"><canvas id="cube"></canvas></div>
+      <p class="note">Drag to turn, scroll to zoom. The first frame is at the front
+        and time runs back; the shaded strip on top is the region the slice sweeps.</p>
+    </section>
+
+    <section class="card wide">
+      <div class="head">
+        <h2>Renders</h2>
+        <span class="note" id="now-playing"></span>
+      </div>
+      <video id="player" controls loop hidden></video>
+      <ul id="renders"></ul>
+    </section>
+  </div>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
