@@ -167,6 +167,28 @@ def test_general_sampler_can_copy_the_nearest_voxel():
     assert np.array_equal(points[0, 1], volume[3, 0, 3])
 
 
+def test_samplers_can_run_round_time_in_a_ring():
+    # Time t reads frame t mod T, so the first frame follows the last and
+    # halfway between them is a blend of the two. x still has edges.
+    t = np.array([-1.0, T, T + 2.4, 2 * T - 0.5, 1.0])
+    x = np.array([3.0, 4.0, 5.0, 6.0, -1.0])
+    rows = np.arange(H)[:, None]
+    for nearest in [False, True]:
+        frame = timeslice.sample_columns(volume, t, x, nearest, wrap=True)
+        assert np.array_equal(frame, timeslice.sample(volume, t, rows, x, nearest, wrap=True))
+        assert np.array_equal(frame, timeslice.sample_noisy_columns(
+            volume, t, x, (0.0, 0.0), Noise(1), 0, nearest, wrap=True))
+        assert np.array_equal(frame[:, 0], volume[T - 1, :, 3])
+        assert np.array_equal(frame[:, 1], volume[0, :, 4])
+        assert (frame[:, 4] == 0).all()
+    assert np.array_equal(frame[:, 2], volume[2, :, 5])
+    assert np.array_equal(frame[:, 3], volume[0, :, 6])
+    blend = timeslice.sample_columns(volume, t, x, wrap=True)[:, 3]
+    assert np.allclose(blend, (volume[T - 1, :, 6] / 2 + volume[0, :, 6] / 2), atol=0.5)
+    # Without wrap, the same points past either end are black.
+    assert (timeslice.sample_columns(volume, t, x)[:, :4] == 0).all()
+
+
 # Surface noise.
 
 Noise = timeslice.Noise
