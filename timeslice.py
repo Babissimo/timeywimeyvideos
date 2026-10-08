@@ -147,6 +147,27 @@ def load_video(path, scale=1.0, time_scale=1.0, start=None, duration=None,
     return volume[:n], fps
 
 
+def crossfade(volume, frames):
+    """Blend the last `frames` frames of a (T, H, W, C) volume into its first,
+    in place, and return the first T - frames: a clip that runs on smoothly
+    from its end into its start when time runs round in a ring.
+
+    Frame i of the fade mixes the clip's frame i with frame T - frames + i,
+    as far past the loop's end as frame i is past its start, taking more of
+    frame i the further in it is. The fade can be at most half the clip.
+    """
+    length = len(volume) - frames
+    if not 0 <= frames <= length:
+        raise ValueError(f"a {frames}-frame fade doesn't fit in a "
+                         f"{len(volume)}-frame clip: it can be at most half")
+    for i in range(frames):
+        w = np.float32((i + 1) / (frames + 1))  # float32 halves the frame-sized temporaries
+        mixed = volume[length + i] * (1 - w)
+        mixed += volume[i] * w
+        volume[i] = (mixed + 0.5).astype(np.uint8)  # rounded, as the samplers do
+    return volume[:length]
+
+
 def open_writer(path, width, height, fps, preset="medium", crf=18):
     """Start an ffmpeg process that encodes raw RGB frames written to its stdin."""
     cmd = ["ffmpeg", "-v", "error", "-y",
@@ -161,28 +182,33 @@ def open_writer(path, width, height, fps, preset="medium", crf=18):
 
 # Sampling. Voxel centres sit at whole-number coordinates. A point between
 # voxels is a blend of its neighbours, each weighted by how close the point is
-# to it (linear interpolation). Points outside the cuboid come out black. The
-# loops are compiled by numba and spread across all CPU cores.
+# to it (linear interpolation). Points outside the cuboid come out black,
+# unless time wraps: then it runs round in a ring, the first frame following
+# the last, and no point is outside it in time. The loops are compiled by numba
+# and spread across all CPU cores.
 
 @njit(cache=True)
-def _neighbours(coord, n):
+def _neighbours(coord, n, wrap=False):
     """The voxel indices either side of coord along an axis of length n, and
-    how far coord is past the first (0 = on it, 0.999 = nearly on the second)."""
+    how far coord is past the first (0 = on it, 0.999 = nearly on the second).
+    With wrap the axis is a ring, so past the last voxel comes the first."""
     lo = int(np.floor(coord))
+    if wrap:
+        return lo % n, (lo + 1) % n, coord - lo
     return max(lo, 0), min(lo + 1, n - 1), coord - lo
 
 
 @njit(parallel=True, cache=True)
-def _sample_points(volume, t, y, x, nearest, out):
+def _sample_points(volume, t, y, x, nearest, wrap, out):
     n_t, n_y, n_x, n_c = volume.shape
     for i in prange(out.shape[0]):
         for j in range(out.shape[1]):
             tt, yy, xx = t[i, j], y[i, j], x[i, j]
-            if not (-0.5 <= tt < n_t - 0.5 and -0.5 <= yy < n_y - 0.5
+            if not ((wrap or -0.5 <= tt < n_t - 0.5) and -0.5 <= yy < n_y - 0.5
                     and -0.5 <= xx < n_x - 0.5):
                 out[i, j, :] = 0
                 continue
-            t0, t1, ft = _neighbours(tt, n_t)
+            t0, t1, ft = _neighbours(tt, n_t, wrap)
             y0, y1, fy = _neighbours(yy, n_y)
             x0, x1, fx = _neighbours(xx, n_x)
             if nearest:
@@ -201,14 +227,14 @@ def _sample_points(volume, t, y, x, nearest, out):
 
 
 @njit(cache=True, inline="always")  # a call per pixel would cost more than the read
-def _read_in_row(volume, tt, row, xx, nearest, out, j):
+def _read_in_row(volume, tt, row, xx, nearest, wrap, out, j):
     """Read the volume at (tt, row, xx) into out[row, j], blending across x
     and t only, since row is a whole number."""
     n_t, _, n_x, n_c = volume.shape
-    if not (-0.5 <= tt < n_t - 0.5 and -0.5 <= xx < n_x - 0.5):
+    if not ((wrap or -0.5 <= tt < n_t - 0.5) and -0.5 <= xx < n_x - 0.5):
         out[row, j, :] = 0
         return
-    t0, t1, ft = _neighbours(tt, n_t)
+    t0, t1, ft = _neighbours(tt, n_t, wrap)
     x0, x1, fx = _neighbours(xx, n_x)
     if nearest:
         ti = t1 if ft >= 0.5 else t0
@@ -223,7 +249,7 @@ def _read_in_row(volume, tt, row, xx, nearest, out, j):
 
 
 @njit(parallel=True, cache=True)
-def _sample_columns(volume, t, x, nearest, out):
+def _sample_columns(volume, t, x, nearest, wrap, out):
     n_t, n_y, n_x, n_c = volume.shape
     n = t.shape[0]
     # Every row of output column j reads the same source columns with the same
@@ -233,9 +259,9 @@ def _sample_columns(volume, t, x, nearest, out):
     x0s, x1s = np.empty(n, np.int64), np.empty(n, np.int64)
     fts, fxs = np.empty(n), np.empty(n)
     for j in range(n):
-        inside[j] = -0.5 <= t[j] < n_t - 0.5 and -0.5 <= x[j] < n_x - 0.5
+        inside[j] = (wrap or -0.5 <= t[j] < n_t - 0.5) and -0.5 <= x[j] < n_x - 0.5
         if inside[j]:
-            t0s[j], t1s[j], fts[j] = _neighbours(t[j], n_t)
+            t0s[j], t1s[j], fts[j] = _neighbours(t[j], n_t, wrap)
             x0s[j], x1s[j], fxs[j] = _neighbours(x[j], n_x)
             if nearest:  # keep only the closest voxel, in t0s and x0s
                 if fts[j] >= 0.5:
@@ -262,31 +288,32 @@ def _sample_columns(volume, t, x, nearest, out):
                 out[row, j, c] = min(255, int(v + 0.5))
 
 
-def sample(volume, t, y, x, nearest=False):
+def sample(volume, t, y, x, nearest=False, wrap=False):
     """Sample a (T, H, W, C) volume at any continuous (t, y, x) points.
 
     t, y and x broadcast together to the (height, width) of the output frame,
     so any surface through the cuboid can be read this way. With nearest,
-    each pixel is copied from the closest voxel instead of blended.
+    each pixel is copied from the closest voxel instead of blended. With
+    wrap, time runs round in a ring: time t reads frame t mod T.
     """
     shape = np.broadcast_shapes(np.shape(t), np.shape(y), np.shape(x))
     t, y, x = (np.broadcast_to(np.asarray(a, np.float64), shape) for a in (t, y, x))
     out = np.empty(shape + volume.shape[3:], np.uint8)
-    _sample_points(volume, t, y, x, nearest, out)
+    _sample_points(volume, t, y, x, nearest, wrap, out)
     return out
 
 
-def sample_columns(volume, t, x, nearest=False):
+def sample_columns(volume, t, x, nearest=False, wrap=False):
     """A faster sample() for slices built from whole source columns.
 
     Output column j is the full-height column of the input at time t[j] and
     position x[j], so only x and t need blending (4 voxels, not 8). Slices that
-    only tilt about the y axis have this shape. With nearest, each pixel is
-    copied from the closest voxel instead of blended.
+    only tilt about the y axis have this shape. nearest and wrap are as for
+    sample().
     """
     out = np.empty((volume.shape[1], len(t)) + volume.shape[3:], np.uint8)
     _sample_columns(volume, np.asarray(t, np.float64), np.asarray(x, np.float64),
-                    nearest, out)
+                    nearest, wrap, out)
     return out
 
 
@@ -324,29 +351,35 @@ def _grad(h, x, y, z):
 
 
 @njit(cache=True)
-def _noise3(perm, x, y, z):
+def _noise3(perm, x, y, z, period):
     fx, fy, fz = np.floor(x), np.floor(y), np.floor(z)
-    X, Y, Z = int(fx) & 255, int(fy) & 255, int(fz) & 255
+    X, Y = int(fx) & 255, int(fy) & 255
+    # The lattice planes either side in z. With a period they wrap round
+    # every `period` cells, so the noise repeats along z.
+    Z0, Z1 = int(fz), int(fz) + 1
+    if period:
+        Z0, Z1 = Z0 % period, Z1 % period
+    Z0, Z1 = Z0 & 255, Z1 & 255
     x, y, z = x - fx, y - fy, z - fz
     u, v, w = _fade(x), _fade(y), _fade(z)
     # Hash the 8 corners of the lattice cell around the point.
     a, b = perm[X] + Y, perm[X + 1] + Y
-    aa, ab, ba, bb = perm[a] + Z, perm[a + 1] + Z, perm[b] + Z, perm[b + 1] + Z
-    return _lerp(w, _lerp(v, _lerp(u, _grad(perm[aa], x, y, z),
-                                      _grad(perm[ba], x - 1, y, z)),
-                             _lerp(u, _grad(perm[ab], x, y - 1, z),
-                                      _grad(perm[bb], x - 1, y - 1, z))),
-                    _lerp(v, _lerp(u, _grad(perm[aa + 1], x, y, z - 1),
-                                      _grad(perm[ba + 1], x - 1, y, z - 1)),
-                             _lerp(u, _grad(perm[ab + 1], x, y - 1, z - 1),
-                                      _grad(perm[bb + 1], x - 1, y - 1, z - 1))))
+    aa, ab, ba, bb = perm[a], perm[a + 1], perm[b], perm[b + 1]
+    return _lerp(w, _lerp(v, _lerp(u, _grad(perm[aa + Z0], x, y, z),
+                                      _grad(perm[ba + Z0], x - 1, y, z)),
+                             _lerp(u, _grad(perm[ab + Z0], x, y - 1, z),
+                                      _grad(perm[bb + Z0], x - 1, y - 1, z))),
+                    _lerp(v, _lerp(u, _grad(perm[aa + Z1], x, y, z - 1),
+                                      _grad(perm[ba + Z1], x - 1, y, z - 1)),
+                             _lerp(u, _grad(perm[ab + Z1], x, y - 1, z - 1),
+                                      _grad(perm[bb + Z1], x - 1, y - 1, z - 1))))
 
 
 @njit(parallel=True, cache=True)
-def _noise_grid(perm, xs, ys, z, out):
+def _noise_grid(perm, xs, ys, z, period, out):
     for i in prange(len(ys)):
         for j in range(len(xs)):
-            out[i, j] = _noise3(perm, xs[j], ys[i], z)
+            out[i, j] = _noise3(perm, xs[j], ys[i], z, period)
 
 
 @functools.lru_cache(maxsize=16)
@@ -419,13 +452,16 @@ class Noise(NamedTuple):
     through "time" or "perpendicular" to the plane, in the x-t plane. `size` is
     roughly how far apart the bumps are, in pixels. The bumps change as the
     sweep goes on, `speed` pixels' worth per output frame; 0 keeps one fixed
-    bumpy surface. `seed` picks the pattern.
+    bumpy surface. `seed` picks the pattern. With a `period`, the bumps come
+    back to the same shape every `period` output frames, the speed rounded
+    to the nearest that does so.
     """
     amplitude: float
     size: float = 64.0
     speed: float = 1.0
     direction: str = "time"
     seed: int = 0
+    period: float = 0.0
 
     def push(self, normal):
         """The (t, x) move of a point where the noise is strongest, on a frame
@@ -440,16 +476,22 @@ class Noise(NamedTuple):
         """The same noise on a video shrunk by factor in x, y and t. speed is
         pixels per output frame, and both shrink together, so it stays."""
         return self._replace(amplitude=self.amplitude * factor,
-                             size=self.size * factor)
+                             size=self.size * factor, period=self.period * factor)
 
     def _grid(self, width, height, f):
         """The noise at the nodes for output frame f, from -1 to 1, and how
         to blend it back to each column and row."""
         us, cols, col_w = _nodes(width, self.size)
         vs, rows, row_w = _nodes(height, self.size)
+        z, cells = f * self.speed / self.size, 0
+        if self.period and self.speed:
+            # A whole number of lattice cells per period, for the noise to
+            # wrap round in. At least 2: in a ring of 1 the planes either
+            # side of a cell are the same, so the bumps barely change.
+            cells = max(2, round(self.period * abs(self.speed) / self.size))
+            z = math.copysign(f * cells / self.period, self.speed)
         nodes = np.empty((len(vs), len(us)))
-        _noise_grid(_permutation(self.seed), us, vs, f * self.speed / self.size,
-                    nodes)
+        _noise_grid(_permutation(self.seed), us, vs, z, cells, nodes)
         return nodes / NOISE_BOUND, cols, col_w, rows, row_w
 
     def field(self, width, height, f):
@@ -461,7 +503,7 @@ class Noise(NamedTuple):
 
 @njit(parallel=True, cache=True)
 def _sample_noisy_columns(volume, t, x, push_t, push_x, nodes, cols, col_w,
-                          rows, row_w, nearest, out):
+                          rows, row_w, nearest, wrap, out):
     for row in prange(volume.shape[1]):
         # Blend the whole row's bumps from the nodes, then read the row.
         bumps = np.empty(t.shape[0])
@@ -469,40 +511,45 @@ def _sample_noisy_columns(volume, t, x, push_t, push_x, nodes, cols, col_w,
                    np.empty(nodes.shape[1]), bumps)
         for j in range(t.shape[0]):
             _read_in_row(volume, t[j] + push_t * bumps[j], row,
-                         x[j] + push_x * bumps[j], nearest, out, j)
+                         x[j] + push_x * bumps[j], nearest, wrap, out, j)
 
 
-def sample_noisy_columns(volume, t, x, push, noise, f, nearest=False):
+def sample_noisy_columns(volume, t, x, push, noise, f, nearest=False, wrap=False):
     """A faster sample() for column slices pushed off their plane by noise.
 
     Output pixel (row, j) is read at time t[j] and position x[j], moved by
     push (a (t, x) pair) times the noise at that pixel of output frame f.
     It works out the noise as it reads, and since every pixel stays in its
     own row, only blends across x and t (4 voxels, not 8). It gives exactly
-    what sample() would at surface()'s points.
+    what sample() would at surface()'s points. nearest and wrap are as for
+    sample().
     """
     height = volume.shape[1]
     out = np.empty((height, len(t)) + volume.shape[3:], np.uint8)
     _sample_noisy_columns(volume, np.asarray(t, np.float64), np.asarray(x, np.float64),
                           float(push[0]), float(push[1]),
-                          *noise._grid(len(t), height, f), nearest, out)
+                          *noise._grid(len(t), height, f), nearest, wrap, out)
     return out
 
 
 # Slice planning. Each function returns a Sweep: the output frame width, the
 # number of output frames, at(f), which gives the (t, x) source position of
-# every column of output frame f, for use with sample_columns, and the (t, x)
-# normal of the frame's plane, which perpendicular noise pushes along.
+# every column of output frame f, for use with sample_columns, the (t, x)
+# normal of the frame's plane, which perpendicular noise pushes along, and
+# whether it loops. A loop runs round time in a ring, so at(f) can lie past
+# either end of the clip, and is read with wrap.
 #
 # Given noise, a plan allows for it pushing points as far as it can: the
 # whole-plane sweep starts and ends early and late enough to catch the bumps,
-# and --inside frames keep far enough from the edges that none leave the video.
+# and --inside and --loop frames keep far enough from the edges that none leave
+# the video.
 
 class Sweep(NamedTuple):
     width: int
     frames: int
     at: Callable[[int], tuple]
     normal: tuple
+    loop: bool = False
 
 
 def _push(noise, normal):
@@ -539,6 +586,11 @@ def _too_long(angle, width, span_t, push_t, n_frames, kind=""):
             f"only {n_frames}.")
 
 
+def _pushed_sideways(angle, push_x):
+    return (f"At {angle:g} degrees the noise can push the ends of the frame "
+            f"{abs(push_x):.3g} pixels sideways, out of the video.")
+
+
 def _rotation(angle):
     theta = math.radians(angle)
     # Round so that 0, 90, 180... degrees land exactly on the voxel grid.
@@ -556,8 +608,8 @@ def _rotation_room(n_frames, width, angle, noise=None):
             (width - 1) * (1 - abs(c)) / 2 - abs(push_x))
 
 
-def rotation_sweep(n_frames, width, angle, inside=False, motion="longest",
-                   noise=None):
+def rotation_sweep(n_frames, width, angle, inside=False, motion=None,
+                   noise=None, loop=False):
     """Plan a sweep with the slicing plane rotated `angle` degrees about y.
 
     Without `inside`, the frame is wide enough to hold the plane's whole cut
@@ -567,15 +619,33 @@ def rotation_sweep(n_frames, width, angle, inside=False, motion="longest",
     With `inside`, the frame is as wide as the input and stays entirely inside
     the cuboid, moving along a straight line through the cuboid's centre:
     "perpendicular" to itself, straight through "time", or along the "longest"
-    line that fits. Raises DoesNotFit if the clip is too short for the angle.
+    line that fits (the default). Raises DoesNotFit if the clip is too short
+    for the angle.
+
+    With `loop`, time runs round in a ring, the clip's first frame following
+    its last. The frame is as wide as the input and moves straight through
+    time once round the ring, so the last output frame leads back into the
+    first. It stays inside the video, so `inside` makes no difference, and no
+    clip is too short.
 
     With `noise`, the sweep allows for the noise pushing points off the plane.
     """
     c, s = _rotation(angle)
     normal = (c, -s)  # (t, x): the way the whole plane sweeps
     push_t, push_x = _push(noise, normal)
+    # Move forward in time unless the plane is turned past 90 degrees,
+    # where the sweep runs backwards (180 degrees plays the clip in reverse).
+    sign_t = 1 if c >= 0 else -1
 
-    if not inside:
+    if loop:
+        if motion not in (None, "time"):
+            raise ValueError("a loop can only move straight through time")
+        if _rotation_room(n_frames, width, angle, noise)[1] < 0:
+            raise DoesNotFit(_pushed_sideways(angle, push_x) + " " + _angles_that_fit(
+                lambda a: _rotation_room(n_frames, width, a, noise)[1] >= 0, 90))
+        out_width, out_frames = width, n_frames
+        dx, dt = 0.0, sign_t
+    elif not inside:
         ahead = abs(push_t * c - push_x * s)  # how far bumps reach off the plane
         out_width = max(1, round(width * abs(c) + n_frames * abs(s)))
         out_frames = max(1, round(width * abs(s) + n_frames * abs(c) + 2 * ahead))
@@ -589,14 +659,11 @@ def rotation_sweep(n_frames, width, angle, inside=False, motion="longest",
             if room_t < 0:
                 why = _too_long(angle, width, (width - 1) * abs(s), push_t, n_frames)
             else:
-                why = (f"At {angle:g} degrees the noise can push the ends of the "
-                       f"frame {abs(push_x):.3g} pixels sideways, out of the video.")
+                why = _pushed_sideways(angle, push_x)
             raise DoesNotFit(why + " " + _angles_that_fit(
                 lambda a: min(_rotation_room(n_frames, width, a, noise)) >= 0, 90))
 
-        # Move forward in time unless the plane is turned past 90 degrees,
-        # where the sweep runs backwards (180 degrees plays the clip in reverse).
-        sign_t = 1 if c >= 0 else -1
+        motion = motion or "longest"
         if motion == "perpendicular":
             dx, dt = -s, c
         elif motion == "time":
@@ -621,7 +688,7 @@ def rotation_sweep(n_frames, width, angle, inside=False, motion="longest",
         step = f - (out_frames - 1) / 2  # distance moved from the centre
         return centre_t + step * dt + across * s, centre_x + step * dx + across * c
 
-    return Sweep(out_width, out_frames, at, normal)
+    return Sweep(out_width, out_frames, at, normal, loop)
 
 
 def _shear(angle):
@@ -641,7 +708,7 @@ def _shear_room(n_frames, width, angle, noise=None):
     return n_frames - 1 - abs(k) * (width - 1) - 2 * abs(push_t), -abs(push_x)
 
 
-def shear_sweep(n_frames, width, angle, inside=False, noise=None):
+def shear_sweep(n_frames, width, angle, inside=False, noise=None, loop=False):
     """Plan a sweep where output column x is input column x, delayed in time
     by tan(angle) frames per pixel across the frame.
 
@@ -649,11 +716,13 @@ def shear_sweep(n_frames, width, angle, inside=False, noise=None):
     time per output frame. Without `inside`, it runs from where the slice
     first touches the video to where it leaves, black where it's outside.
     With `inside`, only positions entirely inside the video are kept; raises
-    DoesNotFit if the clip is too short for the angle.
+    DoesNotFit if the clip is too short for the angle. With `loop`, time runs
+    round in a ring, the clip's first frame following its last, and the frame
+    goes once round it, so the last output frame leads back into the first.
 
     With `noise`, the sweep allows for the noise pushing points off the plane.
-    Perpendicular noise pushes the frame's ends sideways, so with `inside` it
-    only fits at 0 degrees.
+    Perpendicular noise pushes the frame's ends sideways, so with `inside` or
+    `loop` it only fits at 0 degrees.
     """
     if not -90 < angle < 90:
         raise ValueError("shear needs an angle between -90 and 90 degrees "
@@ -664,7 +733,7 @@ def shear_sweep(n_frames, width, angle, inside=False, noise=None):
     delay = (x - (width - 1) / 2) * k
     span_t = abs(k) * (width - 1)  # frames of time one output frame covers
 
-    if inside:
+    if inside or loop:
         room_t, room_x = _shear_room(n_frames, width, angle, noise)
         if room_x < 0:
             raise DoesNotFit(
@@ -672,12 +741,12 @@ def shear_sweep(n_frames, width, angle, inside=False, noise=None):
                 f"a sheared frame {abs(push_x):.3g} pixels sideways, out of the "
                 "video, and a sheared frame always spans the video's whole "
                 "width. Push the noise through time instead.")
-        if room_t < 0:
+        if room_t < 0 and not loop:
             raise DoesNotFit(
                 _too_long(angle, width, span_t, push_t, n_frames, "sheared ")
                 + " " + _angles_that_fit(
                     lambda a: min(_shear_room(n_frames, width, a, noise)) >= 0, 89.9))
-        out_frames = int(room_t + 1e-9) + 1
+        out_frames = n_frames if loop else int(room_t + 1e-9) + 1
     else:
         out_frames = int(n_frames - 1 + span_t + 2 * abs(push_t) + 1e-9) + 1
 
@@ -686,26 +755,31 @@ def shear_sweep(n_frames, width, angle, inside=False, noise=None):
     def at(f):
         return centre_t + (f - (out_frames - 1) / 2) + delay, x
 
-    return Sweep(width, out_frames, at, normal)
+    return Sweep(width, out_frames, at, normal, loop)
 
 
 def plan_sweep(n_frames, width, slice="rotate", angle=45.0, inside=False,
-               motion=None, noise=None):
-    """Plan a sweep of either kind. motion only applies to rotate with
-    inside, and defaults to "longest" there."""
+               motion=None, noise=None, loop=False):
+    """Plan a sweep of either kind. motion only applies to rotate, with
+    inside or loop."""
     if slice == "shear":
-        return shear_sweep(n_frames, width, angle, inside, noise)
+        return shear_sweep(n_frames, width, angle, inside, noise, loop)
     if slice == "rotate":
-        return rotation_sweep(n_frames, width, angle, inside, motion or "longest",
-                              noise)
+        return rotation_sweep(n_frames, width, angle, inside, motion, noise, loop)
     raise ValueError(f"unknown slice {slice!r}")
+
+
+def _looping(noise, sweep):
+    """The noise as the sweep uses it: a loop's comes back round with it."""
+    return noise._replace(period=sweep.frames) if sweep.loop else noise
 
 
 def surface(sweep, f, height, noise):
     """The (t, y, x) source position of every pixel of output frame f, with
     the frame pushed off its plane by the noise, as arrays that broadcast to
-    (height, sweep.width) for sample(). Use the noise the sweep was planned
-    with."""
+    (height, sweep.width) for sample(), with wrap if the sweep loops. Use the
+    noise the sweep was planned with."""
+    noise = _looping(noise, sweep)
     t, x = sweep.at(f)
     bump = noise.field(sweep.width, height, f)
     push_t, push_x = noise.push(sweep.normal)
@@ -717,9 +791,10 @@ def slice_frame(volume, sweep, f, noise=None, nearest=False):
     plane by the noise the sweep was planned with, if any."""
     t, x = sweep.at(f)
     if noise is None:
-        return sample_columns(volume, t, x, nearest)
+        return sample_columns(volume, t, x, nearest, sweep.loop)
+    noise = _looping(noise, sweep)
     return sample_noisy_columns(volume, t, x, noise.push(sweep.normal), noise, f,
-                                nearest)
+                                nearest, sweep.loop)
 
 
 def main():
@@ -741,6 +816,14 @@ def main():
     parser.add_argument("--motion", choices=["perpendicular", "time", "longest"],
                         help="with --slice rotate --inside: the straight line "
                              "the frame moves along (default longest)")
+    parser.add_argument("--loop", action="store_true",
+                        help="make a seamless loop: time runs round in a ring, "
+                             "the first frame following the last, and a frame "
+                             "the input's width goes once round it")
+    parser.add_argument("--loop-fade", type=float, metavar="S",
+                        help="with --loop: blend the clip's last S seconds into "
+                             "its first, so the join from its end back to its "
+                             "start doesn't show (default 0)")
     parser.add_argument("--noise", type=float, default=0.0, metavar="A",
                         help="push each point of the slicing surface up to A "
                              "frames off the plane with Perlin noise (default "
@@ -774,6 +857,14 @@ def main():
         parser.error("--motion doesn't apply to --slice shear: a sheared frame "
                      "always uses every input column, so it can only move "
                      "through time")
+    if args.loop and (args.inside or args.motion):
+        parser.error("--inside and --motion don't apply to --loop: a looping "
+                     "frame always stays inside the video and moves straight "
+                     "through time")
+    if args.loop_fade is not None and not args.loop:
+        parser.error("--loop-fade needs --loop")
+    if (args.loop_fade or 0) < 0:
+        parser.error("--loop-fade can't be negative")
     if args.motion and not args.inside:
         parser.error("--motion needs --inside: without it the frame already "
                      "holds the plane's whole cut through the video, so moving "
@@ -802,11 +893,21 @@ def main():
     n_frames, height, width, _ = volume.shape
     print(f"Loaded {n_frames} frames of {width}x{height} "
           f"({volume.nbytes / 1e9:.2f} GB in memory)")
+    if args.loop_fade:
+        rate = float(fps) * shrink  # of the frames loaded
+        fade = round(args.loop_fade * rate)
+        if 2 * fade > n_frames:
+            sys.exit(f"--loop-fade can be at most half the clip, "
+                     f"{n_frames / 2 / rate:.3g} s.")
+        volume = crossfade(volume, fade)
+        n_frames = len(volume)
 
     try:
         sweep = plan_sweep(n_frames, width, args.slice, args.angle, args.inside,
-                           args.motion, noise)
+                           args.motion, noise, args.loop)
     except DoesNotFit as err:
+        if args.loop:  # only sideways noise can leave a loop's frame
+            sys.exit(f"{err}\nUse less --noise, or --noise-direction time.")
         smaller = "a smaller angle or less --noise" if noise else "a smaller angle"
         sys.exit(f"{err}\nUse a longer clip or {smaller}, or drop --inside "
                  f"to sweep the whole plane with black edges.")

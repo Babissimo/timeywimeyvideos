@@ -167,6 +167,28 @@ def test_general_sampler_can_copy_the_nearest_voxel():
     assert np.array_equal(points[0, 1], volume[3, 0, 3])
 
 
+def test_samplers_can_run_round_time_in_a_ring():
+    # Time t reads frame t mod T, so the first frame follows the last and
+    # halfway between them is a blend of the two. x still has edges.
+    t = np.array([-1.0, T, T + 2.4, 2 * T - 0.5, 1.0])
+    x = np.array([3.0, 4.0, 5.0, 6.0, -1.0])
+    rows = np.arange(H)[:, None]
+    for nearest in [False, True]:
+        frame = timeslice.sample_columns(volume, t, x, nearest, wrap=True)
+        assert np.array_equal(frame, timeslice.sample(volume, t, rows, x, nearest, wrap=True))
+        assert np.array_equal(frame, timeslice.sample_noisy_columns(
+            volume, t, x, (0.0, 0.0), Noise(1), 0, nearest, wrap=True))
+        assert np.array_equal(frame[:, 0], volume[T - 1, :, 3])
+        assert np.array_equal(frame[:, 1], volume[0, :, 4])
+        assert (frame[:, 4] == 0).all()
+    assert np.array_equal(frame[:, 2], volume[2, :, 5])
+    assert np.array_equal(frame[:, 3], volume[0, :, 6])
+    blend = timeslice.sample_columns(volume, t, x, wrap=True)[:, 3]
+    assert np.allclose(blend, (volume[T - 1, :, 6] / 2 + volume[0, :, 6] / 2), atol=0.5)
+    # Without wrap, the same points past either end are black.
+    assert (timeslice.sample_columns(volume, t, x)[:, :4] == 0).all()
+
+
 # Surface noise.
 
 Noise = timeslice.Noise
@@ -194,22 +216,40 @@ def test_noise_changes_over_the_sweep_unless_its_speed_is_zero():
     assert not np.allclose(moving.field(32, 24, 0), moving.field(32, 24, 9))
 
 
+def test_noise_with_a_period_repeats():
+    for speed in [0.37, 1.0, -0.6, 3.0]:
+        noise = Noise(1, size=8, speed=speed, period=40)
+        first = noise.field(32, 24, 3)
+        assert np.allclose(first, noise.field(32, 24, 43), atol=1e-9), speed
+        assert not np.allclose(first, noise.field(32, 24, 23)), speed
+        # and runs smoothly from the end of one period into the next.
+        step = np.abs(noise.field(32, 24, 1) - noise.field(32, 24, 0)).max()
+        assert np.abs(noise.field(32, 24, 39) - noise.field(32, 24, 0)).max() < 2 * step
+    # The speed is rounded to make that work, but never down to standing still.
+    assert not np.allclose(Noise(1, size=64, speed=0.1, period=40).field(32, 24, 0),
+                           Noise(1, size=64, speed=0.1, period=40).field(32, 24, 20))
+    assert np.array_equal(Noise(1, size=8, speed=0, period=40).field(32, 24, 7),
+                          Noise(1, size=8, speed=0).field(32, 24, 7))
+
+
 def test_preview_noise_is_the_full_noise_at_half_size():
     # Sizes where both work the noise out at nodes, and where both work it
-    # out at every pixel.
+    # out at every pixel, with and without a period.
     for size in [64, 3]:
-        full = Noise(1, size=size, speed=0.75, seed=2)
-        half = full.scaled(0.5)
-        for f in [0, 3, 10]:
-            assert np.array_equal(half.field(80, 60, f),
-                                  full.field(160, 120, 2 * f)[::2, ::2]), size
+        for period in [0, 30]:
+            full = Noise(1, size=size, speed=0.75, seed=2, period=period)
+            half = full.scaled(0.5)
+            for f in [0, 3, 10]:
+                assert np.array_equal(half.field(80, 60, f),
+                                      full.field(160, 120, 2 * f)[::2, ::2]), size
 
 
 def exact_noise(noise, width, height, f):
     """Perlin noise worked out at every pixel, from -1 to 1."""
     out = np.empty((height, width))
     timeslice._noise_grid(timeslice._permutation(noise.seed), np.arange(width) / noise.size,
-                          np.arange(height) / noise.size, f * noise.speed / noise.size, out)
+                          np.arange(height) / noise.size, f * noise.speed / noise.size, 0,
+                          out)
     return out / timeslice.NOISE_BOUND
 
 
@@ -356,6 +396,115 @@ def test_sheared_inside_frames_only_take_perpendicular_noise_at_zero_degrees():
     assert "Push the noise through time" in message(
         timeslice.shear_sweep, 13, 5, 20, inside=True, noise=noise)
     assert timeslice.shear_sweep(13, 5, 0, inside=True, noise=noise).frames == 11
+
+
+
+# Loops.
+
+def loop(kind, angle, vol=volume, **kwargs):
+    return timeslice.plan_sweep(len(vol), vol.shape[2], kind, angle, loop=True, **kwargs)
+
+
+def frames_of(vol, sweep, noise=None, nearest=False, frames=None):
+    return np.stack([timeslice.slice_frame(vol, sweep, f, noise, nearest)
+                     for f in range(sweep.frames if frames is None else frames)])
+
+
+def test_a_loop_at_zero_degrees_is_the_clip():
+    for kind in ["rotate", "shear"]:
+        sweep = loop(kind, 0)
+        assert sweep.loop and sweep.frames == T and sweep.width == W
+        assert np.array_equal(frames_of(volume, sweep), volume)
+
+
+def test_a_loop_comes_back_round_to_its_first_frame():
+    # The frame after the last is the first again, so played on repeat the
+    # video never jumps, at any angle and with noise too.
+    noise = Noise(1.5, size=3.0, speed=0.6, seed=1)
+    for kind, angle in [("rotate", 30), ("rotate", 90), ("rotate", 135),
+                        ("rotate", -60), ("shear", 45), ("shear", -70)]:
+        sweep = loop(kind, angle, noise=noise)
+        assert sweep.frames == T and sweep.width == W
+        t0, x0 = sweep.at(0)
+        t1, x1 = sweep.at(sweep.frames)
+        assert np.allclose(np.abs(t1 - t0), T) and np.allclose(x1, x0)
+        for bumps in [None, noise]:
+            first = timeslice.slice_frame(volume, sweep, 0, bumps).astype(int)
+            after = timeslice.slice_frame(volume, sweep, sweep.frames, bumps).astype(int)
+            assert np.abs(after - first).max() <= 1, (kind, angle, bumps)
+
+
+def test_a_loop_moves_straight_through_time_inside_the_video():
+    for angle in [10, 45, 80, 90, 135, -30]:
+        sweep = loop("rotate", angle)
+        sign = 1 if math.cos(math.radians(angle)) >= 0 else -1
+        for f in range(sweep.frames):
+            t, x = sweep.at(f)
+            assert np.allclose(t - sweep.at(0)[0], sign * f)
+            assert x.min() > -1e-9 and x.max() < W - 1 + 1e-9
+    # However short the clip, since time wraps round.
+    assert loop("rotate", 80, long_volume[:2]).frames == 2
+
+
+def test_a_loop_reads_round_the_end_of_the_clip():
+    # At 45 degrees column x of shear frame f is frame f + x - 5, wrapped.
+    frames = frames_of(volume, loop("shear", 45))
+    for f in range(T):
+        for x in range(W):
+            assert np.array_equal(frames[f, :, x], volume[(f + x - 5) % T, :, x])
+
+
+def test_noisy_loops_match_the_general_sampler():
+    for kind, angle, direction in [("rotate", 30, "time"), ("rotate", 70, "perpendicular"),
+                                   ("shear", 20, "time")]:
+        noise = Noise(1.5, size=3.0, speed=0.6, direction=direction, seed=1)
+        sweep = loop(kind, angle, noise=noise)
+        for f in range(sweep.frames):
+            for nearest in [False, True]:
+                slow = timeslice.sample(volume, *timeslice.surface(sweep, f, H, noise),
+                                        nearest, wrap=True)
+                assert np.array_equal(
+                    timeslice.slice_frame(volume, sweep, f, noise, nearest), slow)
+
+
+def test_a_loop_only_takes_perpendicular_noise_that_keeps_inside():
+    sideways = Noise(1.0, direction="perpendicular")
+    text = message(timeslice.rotation_sweep, 13, 5, 20, noise=sideways, loop=True)
+    assert "sideways" in text and text.endswith("Angles of 0 and 53.2 to 90 degrees fit this clip.")
+    assert timeslice.rotation_sweep(13, 5, 60, noise=sideways, loop=True).frames == 13
+    assert "Push the noise through time" in message(
+        timeslice.shear_sweep, 13, 5, 20, noise=sideways, loop=True)
+    # Noise through time never leaves a ring.
+    assert timeslice.shear_sweep(3, 5, 80, noise=Noise(9.0), loop=True).frames == 3
+
+
+def test_a_loop_only_moves_through_time():
+    raises(ValueError, timeslice.rotation_sweep, T, W, 30, motion="longest", loop=True)
+    assert loop("rotate", 30, motion="time").frames == T
+
+
+def test_crossfade_spreads_the_join_round_the_loop():
+    # A clip that brightens steadily jumps back from 120 to 0 when played on
+    # repeat. Faded over 4 frames, the jump is shared out in small steps.
+    ramp = np.broadcast_to(np.arange(13, dtype=np.uint8)[:, None, None, None] * 10,
+                           (13, 2, 2, 3)).copy()
+    looped = timeslice.crossfade(ramp, 4)
+    assert len(looped) == 9
+    levels = looped[:, 0, 0, 0].astype(int)
+    assert list(levels) == [72, 64, 56, 48, 40, 50, 60, 70, 80]
+    steps = np.abs(np.diff(np.append(levels, levels[0])))
+    assert steps.max() <= 10
+
+
+def test_crossfade_only_changes_the_frames_it_blends():
+    looped = timeslice.crossfade(long_volume.copy(), 3)
+    assert np.array_equal(looped[3:], long_volume[3:10])
+    for i in range(3):
+        w = (i + 1) / 4
+        mixed = long_volume[10 + i] * (1 - w) + long_volume[i] * w
+        assert np.abs(looped[i] - mixed).max() <= 0.5
+    assert np.array_equal(timeslice.crossfade(long_volume.copy(), 0), long_volume)
+    raises(ValueError, timeslice.crossfade, long_volume.copy(), 7)  # over half of 13
 
 
 if __name__ == "__main__":
