@@ -11,3 +11,8 @@ __pycache__/
 videos/
 uploads/
 renders/
+
+# TypeScript build
+node_modules/
+.vitest/
+web/dist/
