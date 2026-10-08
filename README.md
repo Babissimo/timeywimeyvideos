@@ -35,6 +35,11 @@ python timeslice.py input.mp4 output.mp4 --angle 30             # final cut
 | `--slice rotate\|shear` | how to read along the tilted plane (default `rotate`; see below) |
 | `--inside` | keep each frame the input's width and entirely inside the video: no black edges |
 | `--motion perpendicular\|time\|longest` | with `--slice rotate --inside`: which way the frame moves (default `longest`) |
+| `--noise A` | push each point of the surface up to A frames off the plane with Perlin noise (default 0: flat; see below) |
+| `--noise-size PX` | roughly how far apart the bumps are, in pixels (default 64) |
+| `--noise-speed PX` | how fast the bumps change, in pixels per output frame (default 1; 0 keeps them still) |
+| `--noise-direction time\|perpendicular` | which way the noise pushes points (default `time`) |
+| `--noise-seed N` | which noise pattern to use (default 0) |
 | `--preview` | quick rough render (see below) |
 | `--scale F` | resize each input frame first, e.g. `0.5`; keeps every frame |
 | `--start S`, `--duration S` | use only part of the input (in seconds) |
@@ -75,7 +80,8 @@ which are saved in `uploads/`.
   first frame at the front and time running back, the current output frame
   drawn where it cuts through, and the region the sweep covers shaded on top.
   Drag to turn it, scroll to zoom, or pick a view; **Top** is the x-t diagram
-  below.
+  below. With surface noise on it still draws the flat plane the points are
+  pushed off, not the bumps.
 - **Render preview** and **Render full quality** run `timeslice.py` in a
   separate process with the options on the page. Renders are saved in
   `renders/` and can be watched and downloaded from the page.
@@ -149,6 +155,48 @@ time. The whole-plane sweep always moves perpendicular, because there the
 frame already holds the plane's whole cut through the video and another
 direction would only change the speed.
 
+### Surface noise (`--noise`)
+
+`--noise A` makes the slicing surface bumpy instead of flat: Perlin noise
+(Ken Perlin's "Improving Noise", SIGGRAPH 2002) pushes each pixel of the
+frame off the plane by up to A frames (one frame = one pixel). The noise is a
+smooth random function of the pixel's position in the frame and of how far
+the sweep has got, so the bumps change as the frame moves. It works with
+every slice, angle and motion.
+
+- `--noise-direction time` (default) reads each pixel up to A frames earlier
+  or later than the flat frame would. It only shows where something moves:
+  still parts of the scene look the same at every moment. On a rotated frame
+  near 90° the frame itself runs through time, so this slides points along
+  the frame rather than off it.
+- `--noise-direction perpendicular` moves each point straight off the plane
+  in x–t, which is a true bump at every angle. At 0° it's the same as `time`;
+  otherwise it moves points sideways in x too, so a sheared frame's column x
+  is no longer exactly input column x.
+- `--noise-size` is roughly how far apart the bumps are, and `--noise-speed`
+  how fast they change: the pattern moves that many pixels through a third
+  noise dimension per output frame. With 0 the surface keeps one shape as it
+  sweeps. `--noise-seed` picks a different pattern.
+
+The noise never moves a point further than A, and the sweep allows for that.
+The whole-plane sweep starts earlier and ends later, by as far as the bumps
+can reach ahead of the plane, so their first and last contact with the video
+is included. With `--inside`, the frame keeps that far from the video's
+edges, so no bump comes out black. That makes inside videos shorter,
+and some combinations don't fit:
+
+- Perpendicular noise pushes the ends of a full-width rotated frame sideways.
+  At small angles (but not exactly 0°) there's no room for that, so these
+  fit only once the frame has turned far enough. The error message says
+  which angles fit.
+- A sheared frame always spans the video's whole width, so with
+  perpendicular noise and `--inside` it only fits at 0°.
+
+Previews and the live view shrink A and the size with the clip, so they show
+the same bumps as the full render. Noise makes sampling slower: on a 4-core
+machine a 1080p frame took about 130 ms to slice and encode, against 77 ms
+flat.
+
 ## Code layout
 
 `timeslice.py` is split so that new kinds of slices only need new coordinates:
@@ -160,8 +208,14 @@ direction would only change the speed.
   source columns, which is what any tilt about the y axis gives. It only
   blends across x and t (4 voxels), or copies the nearest one for previews.
 - `rotation_sweep(...)` and `shear_sweep(...)` plan a sweep: the output size,
-  and `at(f)`, the (t, x) position of every column of output frame f.
+  `at(f)`, the (t, x) position of every column of output frame f, and the
+  normal of the frame's plane. Given noise, they make room for it.
 - `plan_sweep(...)` picks between them.
+- `Noise` is the surface noise: `field(...)` gives its values over a frame,
+  and `push(normal)` which way and how far they move a point.
+- `surface(...)` gives the (t, y, x) position of every pixel of a noisy
+  frame, and `slice_frame(...)` makes an output frame, with
+  `sample_columns` when the surface is flat and `sample` when it's bumpy.
 - `main()` handles decoding and encoding (via ffmpeg).
 
 `webapp.py` is the web server (Flask), and `web/` holds the page it serves.

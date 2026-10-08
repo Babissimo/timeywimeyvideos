@@ -169,18 +169,44 @@ def read_options(values):
                 raise ValueError
         except (ValueError, ZeroDivisionError):
             raise Problem("Output fps must be a positive number, like 24 or 30000/1001.")
+
+    noise = None
+    amplitude = number("noise", 0.0, low=0)
+    if amplitude:
+        noise = timeslice.Noise(amplitude)  # for its defaults
+        direction = values.get("noise_direction") or noise.direction
+        if direction not in ("time", "perpendicular"):
+            raise Problem(f"Unknown noise direction {direction!r}.")
+        seed = values.get("noise_seed")
+        try:
+            seed = noise.seed if seed in (None, "") else int(seed)
+            if seed < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise Problem("The noise seed must be a whole number, 0 or more.")
+        noise = noise._replace(size=number("noise_size", noise.size, above=0),
+                               speed=number("noise_speed", noise.speed),
+                               direction=direction, seed=seed)
+
     return dict(slice=slice_, angle=number("angle", 45.0), inside=inside,
-                motion=motion, scale=number("scale", 1.0, above=0),
+                motion=motion, noise=noise, scale=number("scale", 1.0, above=0),
                 start=number("start", low=0), duration=number("duration", above=0),
                 fps=fps)
 
 
-def plan(n_frames, width, opts):
+def live_noise(opts):
+    """The noise for the live view's half-size clip."""
+    return opts["noise"] and opts["noise"].scaled(timeslice.PREVIEW_SCALE)
+
+
+def plan(n_frames, width, opts, noise=None):
+    """Plan the sweep, with `noise` scaled to match the clip."""
     try:
         return timeslice.plan_sweep(n_frames, width, opts["slice"], opts["angle"],
-                                    opts["inside"], opts["motion"])
+                                    opts["inside"], opts["motion"], noise)
     except timeslice.DoesNotFit as err:
-        raise Problem(f"{err} Use a longer clip or a smaller angle, or untick "
+        smaller = "a smaller angle or less noise" if noise else "a smaller angle"
+        raise Problem(f"{err} Use a longer clip or {smaller}, or untick "
                       "Inside to sweep the whole plane with black edges.",
                       kind="does_not_fit")
     except ValueError as err:
@@ -239,7 +265,7 @@ def full_size(path, opts):
     height = max(1, round(height * opts["scale"]))
     n_frames = max(1, round(seconds * fps))
     try:
-        sweep = plan(n_frames, width, opts)
+        sweep = plan(n_frames, width, opts, opts["noise"])
     except Problem as err:
         return dict(error=str(err))
     out_fps = Fraction(opts["fps"]) if opts["fps"] else fps
@@ -258,12 +284,13 @@ def frame():
         pos = min(max(float(request.args.get("pos", 0)), 0.0), 1.0)
     except ValueError:
         pos = 0.0
+    noise = live_noise(opts)
     with live_lock:
         volume, fps = live_clip(path, opts)
         n_frames, height, width, _ = volume.shape
-        sweep = plan(n_frames, width, opts)
+        sweep = plan(n_frames, width, opts, noise)
         f = round(pos * (sweep.frames - 1))
-        image = timeslice.sample_columns(volume, *sweep.at(f), nearest=True)
+        image = timeslice.slice_frame(volume, sweep, f, noise, nearest=True)
     out_fps = (Fraction(opts["fps"]) if opts["fps"] else fps) * \
         Fraction(timeslice.PREVIEW_SCALE)
     details = dict(
@@ -290,6 +317,17 @@ def output_path(source, opts, preview):
         parts.append("inside")
     if opts["motion"]:
         parts.append(opts["motion"])
+    noise, plain = opts["noise"], timeslice.Noise(0)
+    if noise:
+        parts.append(f"noise{noise.amplitude:g}")
+        if noise.size != plain.size:
+            parts.append(f"noisesize{noise.size:g}")
+        if noise.speed != plain.speed:
+            parts.append(f"noisespeed{noise.speed:g}")
+        if noise.direction != plain.direction:
+            parts.append(f"noise{noise.direction}")
+        if noise.seed != plain.seed:
+            parts.append(f"noiseseed{noise.seed}")
     if opts["start"] is not None:
         parts.append(f"from{opts['start']:g}s")
     if opts["duration"] is not None:
@@ -310,6 +348,11 @@ def render_command(source, output, opts, preview):
         cmd.append("--inside")
     if opts["motion"]:
         cmd.append(f"--motion={opts['motion']}")
+    if opts["noise"]:
+        noise = opts["noise"]
+        cmd += [f"--noise={noise.amplitude:g}", f"--noise-size={noise.size:g}",
+                f"--noise-speed={noise.speed:g}",
+                f"--noise-direction={noise.direction}", f"--noise-seed={noise.seed}"]
     if opts["scale"] != 1:
         cmd.append(f"--scale={opts['scale']:g}")
     if opts["start"] is not None:
@@ -425,10 +468,14 @@ def renders():
 
 
 def warm_up():
-    """Load numba's compiled sampler now, so the first live frame is quick."""
+    """Load numba's compiled samplers and noise now, so the first live frame
+    is quick."""
+    volume = np.zeros((2, 2, 2, 3), np.uint8)
+    noise = timeslice.Noise(0.1)
     with live_lock:
-        timeslice.sample_columns(np.zeros((2, 2, 2, 3), np.uint8), [0.0], [0.0],
-                                 nearest=True)
+        timeslice.slice_frame(volume, timeslice.plan_sweep(2, 2), 0, nearest=True)
+        timeslice.slice_frame(volume, timeslice.plan_sweep(2, 2, noise=noise), 0,
+                              noise, nearest=True)
 
 
 def main():

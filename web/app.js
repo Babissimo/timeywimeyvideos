@@ -21,6 +21,10 @@ const DESCRIBE = {
   perpendicular: "Like the whole-plane sweep. Every frame is a fresh slice, " +
     "but there's little room at small angles.",
   time: "Forward through time, like ordinary playback but tilted.",
+  "noise-time": "Each pixel is read up to that many frames earlier or later. " +
+    "On a rotated frame near 90° this slides along the frame rather than off it.",
+  "noise-perpendicular": "Each point moves straight off the plane. On a sheared " +
+    "frame that moves columns sideways too, so Inside only fits at 0°.",
 };
 
 function sliceKind() {
@@ -30,12 +34,18 @@ function sliceKind() {
 function options() {
   const slice = sliceKind();
   const inside = $("inside").checked;
+  const noise = $("noise").checked;
   return {
     source: state.source,
     slice,
     angle: $("angle").value || "0",
     inside: inside ? "1" : "",
     motion: slice === "rotate" && inside ? $("motion").value : "",
+    noise: noise ? $("noise-amount").value || "0" : "",
+    noise_size: noise ? $("noise-size").value : "",
+    noise_speed: noise ? $("noise-speed").value : "",
+    noise_direction: noise ? $("noise-direction").value : "",
+    noise_seed: noise ? $("noise-seed").value : "",
     start: $("start").value,
     duration: $("duration").value,
     scale: $("scale").value || "1",
@@ -278,6 +288,31 @@ for (const id of ["start", "duration", "scale", "fps"]) {
   $(id).addEventListener("change", refresh);
 }
 
+function noiseChanged() {
+  const on = $("noise").checked;
+  const direction = $("noise-direction").value;
+  $("noise-fields").hidden = !on;
+  $("noise-note").textContent = DESCRIBE[`noise-${direction}`];
+  $("cube-noise").hidden = !on;
+  $("cube-noise").textContent = "With noise on, the real surface is bumpy: the frame " +
+    `is drawn on the flat plane its points are pushed off, up to ${$("noise-amount").value || 0} ` +
+    `frames ${direction === "time" ? "through time" : "perpendicular to it"}.`;
+  refresh();
+}
+
+for (const id of ["noise", "noise-size", "noise-speed", "noise-direction", "noise-seed"]) {
+  $(id).addEventListener("change", noiseChanged);
+}
+$("noise-range").addEventListener("input", () => {
+  $("noise-amount").value = $("noise-range").value;
+  noiseChanged();
+});
+$("noise-amount").addEventListener("input", () => {
+  if ($("noise-amount").value === "" || !$("noise-amount").checkValidity()) return;
+  $("noise-range").value = $("noise-amount").value;
+  noiseChanged();
+});
+
 // ---------------------------------------------------------------------------
 // Sources.
 
@@ -404,7 +439,7 @@ async function loadFace(opts) {
   face = null;
   try {
     const res = await fetch(frameURL(
-      { ...opts, slice: "rotate", angle: 0, inside: "", motion: "" }, 0));
+      { ...opts, slice: "rotate", angle: 0, inside: "", motion: "", noise: "" }, 0));
     if (!res.ok || key !== faceKey) return;
     const info = JSON.parse(res.headers.get("X-Info"));
     const canvas = document.createElement("canvas");
@@ -740,6 +775,7 @@ function watch(src, label, version = Date.now()) {
 
 async function start() {
   slicesChanged();
+  noiseChanged();
   await Promise.all([loadSources(), loadRenders()]);
   const job = await getJSON("/api/render");
   showJob(job);
