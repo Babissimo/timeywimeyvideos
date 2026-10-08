@@ -153,15 +153,23 @@ def read_options(values):
             raise Problem(f"{name} is out of range.")
         return value
 
+    def flag(name):
+        return str(values.get(name, "")).lower() in ("1", "true")
+
     slice_ = values.get("slice") or "rotate"
     if slice_ not in ("rotate", "shear"):
         raise Problem(f"Unknown slice {slice_!r}.")
-    inside = str(values.get("inside", "")).lower() in ("1", "true")
+    loop = flag("loop")
+    sides = loop and flag("loop_sides")
+    inside = flag("inside") and not loop  # a looping frame is always inside
     motion = values.get("motion") or None
     if motion not in (None, "perpendicular", "time", "longest"):
         raise Problem(f"Unknown motion {motion!r}.")
-    if slice_ == "shear" or not inside:
-        motion = None  # only rotate --inside frames can move different ways
+    if slice_ == "shear" or not (inside or sides):
+        motion = None  # only these rotate frames can move different ways
+    elif sides and motion == "longest":
+        raise Problem("A loop round the sides moves through time or "
+                      "perpendicular to the frame: no line on it is the longest.")
     fps = values.get("fps") or None
     if fps is not None:
         try:
@@ -191,7 +199,9 @@ def read_options(values):
     return dict(slice=slice_, angle=number("angle", 45.0), inside=inside,
                 motion=motion, noise=noise, scale=number("scale", 1.0, above=0),
                 start=number("start", low=0), duration=number("duration", above=0),
-                fps=fps)
+                fps=fps, loop=loop, sides=sides,
+                loop_fade=number("loop_fade", 0.0, low=0) if loop else 0.0,
+                side_fade=number("loop_side_fade", 0.0, low=0) if sides else 0.0)
 
 
 def live_noise(opts):
@@ -203,14 +213,33 @@ def plan(n_frames, width, opts, noise=None):
     """Plan the sweep, with `noise` scaled to match the clip."""
     try:
         return timeslice.plan_sweep(n_frames, width, opts["slice"], opts["angle"],
-                                    opts["inside"], opts["motion"], noise)
+                                    opts["inside"], opts["motion"], noise,
+                                    opts["loop"], opts["sides"])
     except timeslice.DoesNotFit as err:
+        if opts["loop"]:  # only sideways noise can leave a loop's frame
+            raise Problem(f"{err} Use less noise, push it through time, or wrap "
+                          "round the sides too.", kind="sideways")
         smaller = "a smaller angle or less noise" if noise else "a smaller angle"
-        raise Problem(f"{err} Use a longer clip or {smaller}, or untick "
-                      "Inside to sweep the whole plane with black edges.",
+        raise Problem(f"{err} Use a longer clip or {smaller}, or choose "
+                      "Let black in or Wrap round at the video's edges.",
                       kind="does_not_fit")
     except ValueError as err:
         raise Problem(str(err))
+
+
+def loop_fades(n_frames, width, rate, opts, shrink=1.0):
+    """How many frames and columns the loop's crossfades blend, for a clip
+    of n_frames at this frame rate, `width` pixels wide once shrunk by
+    `shrink`."""
+    frames = round(opts["loop_fade"] * rate)
+    columns = round(opts["side_fade"] * shrink)
+    if 2 * frames > n_frames:
+        raise Problem("The crossfade at the ends can be at most half the clip, "
+                      f"{n_frames / 2 / rate:.3g} s.")
+    if 2 * columns > width:
+        raise Problem("The crossfade at the sides can be at most half the width, "
+                      f"{width / shrink / 2:g} pixels.")
+    return frames, columns
 
 
 # The live view. numba's parallel loops mustn't be entered from two threads
@@ -222,10 +251,10 @@ live = {"key": None, "volume": None, "fps": None}
 
 
 def live_clip(path, opts):
-    """The half-size clip for these options, loading it if it changed.
-    Call with live_lock held."""
+    """The half-size clip for these options, loading it if it changed, with
+    the loop's crossfades done. Call with live_lock held."""
     key = (str(path), path.stat().st_mtime, opts["scale"], opts["start"],
-           opts["duration"])
+           opts["duration"], opts["loop_fade"], opts["side_fade"])
     if live["key"] != key:
         shrink = timeslice.PREVIEW_SCALE
         width, height, fps, length = probe(path)
@@ -238,6 +267,9 @@ def live_clip(path, opts):
                     f"The live view would need {size / 1e9:.1f} GB of memory for "
                     f"this clip (the limit is {LIVE_LIMIT_GB} GB). Set a shorter "
                     "duration or a smaller scale.")
+            # Refuse fades that plainly don't fit before decoding the clip.
+            loop_fades(round(seconds * fps * shrink), round(width * opts["scale"] * shrink),
+                       float(fps) * shrink, opts, shrink)
         live.update(key=None, volume=None, fps=None)  # let the old clip go first
         try:
             volume, fps = timeslice.load_video(str(path), opts["scale"] * shrink,
@@ -245,6 +277,10 @@ def live_clip(path, opts):
                                                opts["duration"], fast=True)
         except timeslice.VideoError as err:
             raise Problem(str(err), 422)
+        # The fades work in place, so a change to them loads the clip afresh.
+        frames, columns = loop_fades(len(volume), volume.shape[2], float(fps) * shrink,
+                                     opts, shrink)
+        volume = timeslice.crossfade(timeslice.crossfade(volume, frames), columns, axis=2)
         live.update(key=key, volume=volume, fps=fps)
     return live["volume"], live["fps"]
 
@@ -265,7 +301,8 @@ def full_size(path, opts):
     height = max(1, round(height * opts["scale"]))
     n_frames = max(1, round(seconds * fps))
     try:
-        sweep = plan(n_frames, width, opts, opts["noise"])
+        frames, columns = loop_fades(n_frames, width, float(fps), opts)
+        sweep = plan(n_frames - frames, width - columns, opts, opts["noise"])
     except Problem as err:
         return dict(error=str(err))
     out_fps = Fraction(opts["fps"]) if opts["fps"] else fps
@@ -297,6 +334,7 @@ def frame():
         width=sweep.width, height=height, frames=sweep.frames, frame=f,
         fps=float(out_fps), seconds=float(sweep.frames / out_fps),
         volume=[n_frames, height, width], memory=volume.nbytes,
+        loop=sweep.loop, sides=sweep.sides,
         line=endpoints(sweep, f), first=endpoints(sweep, 0),
         last=endpoints(sweep, sweep.frames - 1), full=full_size(path, opts))
     return Response(image.tobytes(), mimetype="application/octet-stream",
@@ -317,6 +355,14 @@ def output_path(source, opts, preview):
         parts.append("inside")
     if opts["motion"]:
         parts.append(opts["motion"])
+    if opts["loop"]:
+        parts.append("loop")
+        if opts["loop_fade"]:
+            parts.append(f"loopfade{opts['loop_fade']:g}s")
+    if opts["sides"]:
+        parts.append("sides")
+        if opts["side_fade"]:
+            parts.append(f"sidefade{opts['side_fade']:g}px")
     noise, plain = opts["noise"], timeslice.Noise(0)
     if noise:
         parts.append(f"noise{noise.amplitude:g}")
@@ -348,6 +394,10 @@ def render_command(source, output, opts, preview):
         cmd.append("--inside")
     if opts["motion"]:
         cmd.append(f"--motion={opts['motion']}")
+    if opts["loop"]:
+        cmd += ["--loop", f"--loop-fade={opts['loop_fade']:g}"]
+    if opts["sides"]:
+        cmd += ["--loop-sides", f"--loop-side-fade={opts['side_fade']:g}"]
     if opts["noise"]:
         noise = opts["noise"]
         cmd += [f"--noise={noise.amplitude:g}", f"--noise-size={noise.size:g}",
@@ -471,11 +521,13 @@ def warm_up():
     """Load numba's compiled samplers and noise now, so the first live frame
     is quick."""
     volume = np.zeros((2, 2, 2, 3), np.uint8)
+    narrowed = volume[:, :, :1]  # what a crossfade at the sides leaves
     noise = timeslice.Noise(0.1)
     with live_lock:
-        timeslice.slice_frame(volume, timeslice.plan_sweep(2, 2), 0, nearest=True)
-        timeslice.slice_frame(volume, timeslice.plan_sweep(2, 2, noise=noise), 0,
-                              noise, nearest=True)
+        for clip in [volume, narrowed]:
+            timeslice.slice_frame(clip, timeslice.plan_sweep(2, 2), 0, nearest=True)
+            timeslice.slice_frame(clip, timeslice.plan_sweep(2, 2, noise=noise), 0,
+                                  noise, nearest=True)
 
 
 def main():

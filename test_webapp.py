@@ -73,7 +73,37 @@ def test_too_steep_for_inside_says_so():
     res, _, _ = frame(angle=80, inside=1)  # up to about 69 degrees fits
     assert res.status_code == 400
     assert res.get_json()["kind"] == "does_not_fit"
-    assert "untick Inside" in res.get_json()["error"]
+    assert "Let black in or Wrap round" in res.get_json()["error"]
+
+
+def test_live_loops_match_a_preview_render():
+    volume, _ = timeslice.load_video(str(clip), 0.5, 0.5, fast=True)  # 30 frames at 10 fps
+    looped = timeslice.crossfade(volume, 5)  # half a second
+    _, info, image = frame(angle=30, loop=1, loop_fade=0.5, pos=0.25)
+    sweep = timeslice.plan_sweep(len(looped), 32, "rotate", 30, loop=True)
+    f = round(0.25 * (sweep.frames - 1))
+    assert info["loop"] and not info["sides"]
+    assert info["frame"] == f and info["frames"] == sweep.frames == 25
+    assert np.array_equal(image, timeslice.slice_frame(looped, sweep, f, nearest=True))
+    assert info["full"]["frames"] == 50  # 60 frames less a second's fade
+
+    volume, _ = timeslice.load_video(str(clip), 0.5, 0.5, fast=True)
+    looped = timeslice.crossfade(volume, 4, axis=2)  # 8 pixels at full size
+    _, info, image = frame(angle=80, loop=1, loop_sides=1, motion="perpendicular",
+                           loop_side_fade=8, inside=1, pos=0.5)
+    sweep = timeslice.plan_sweep(30, 28, "rotate", 80, motion="perpendicular",
+                                 loop=True, sides=True)
+    f = round(0.5 * (sweep.frames - 1))
+    assert info["sides"] and info["width"] == 28 and info["frames"] == sweep.frames
+    assert np.array_equal(image, timeslice.slice_frame(looped, sweep, f, nearest=True))
+    assert info["full"]["width"] == 56
+
+
+def test_a_loop_pushed_sideways_offers_to_wrap_the_sides():
+    res, _, _ = frame(angle=20, loop=1, noise=8, noise_direction="perpendicular")
+    assert res.status_code == 400 and res.get_json()["kind"] == "sideways"
+    assert frame(angle=20, loop=1, loop_sides=1, noise=8,
+                 noise_direction="perpendicular")[0].status_code == 200
 
 
 def test_bad_options_are_refused():
@@ -86,6 +116,10 @@ def test_bad_options_are_refused():
     assert frame(noise=2, noise_direction="sideways")[0].status_code == 400
     assert frame(noise=2, noise_seed="1.5")[0].status_code == 400
     assert frame(noise=2, noise_seed=-1)[0].status_code == 400
+    assert frame(loop=1, loop_fade=-1)[0].status_code == 400
+    assert frame(loop=1, loop_fade=2)[0].status_code == 400  # over half the 3 s clip
+    assert frame(loop=1, loop_sides=1, loop_side_fade=40)[0].status_code == 400
+    assert frame(loop=1, loop_sides=1, motion="longest")[0].status_code == 400
 
 
 def test_only_serves_files_in_its_folders():
@@ -144,6 +178,26 @@ def test_render_with_noise_makes_what_the_live_view_shows():
          str(webapp.folders["renders"] / job["output"])],
         capture_output=True, text=True, check=True).stdout
     assert int(frames) == info["frames"]
+
+
+def test_render_of_a_loop_makes_what_the_live_view_shows():
+    options = dict(angle=60, loop=1, loop_fade=0.4, loop_sides=1, motion="perpendicular",
+                   loop_side_fade=6)
+    _, info, _ = frame(**options)
+    res = client.post("/api/render", json={"source": "videos/clip.mp4", "preview": True,
+                                           **options})
+    assert res.get_json()["state"] == "running"
+    job = finish_render()
+    assert job["state"] == "done", job
+    assert job["output"] == ("clip_rotate_60deg_perpendicular_loop_loopfade0.4s_sides_"
+                             "sidefade6px_preview.mp4")
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
+         "-show_entries", "stream=nb_read_frames,width", "-of", "csv=p=0",
+         str(webapp.folders["renders"] / job["output"])],
+        capture_output=True, text=True, check=True).stdout.strip()
+    width, frames = probe.split(",")
+    assert int(frames) == info["frames"] and int(width) == info["width"] + info["width"] % 2
 
 
 if __name__ == "__main__":
