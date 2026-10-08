@@ -32,6 +32,7 @@ uv run timeslice.py input.mp4 output.mp4 --angle 30             # final cut
 | `--inside` | keep each frame the input's width and entirely inside the video: no black edges |
 | `--motion perpendicular\|time\|longest` | with `--slice rotate --inside`: which way the frame moves (default `longest`) |
 | `--loop` | make a video that loops seamlessly: time runs round in a ring (see below) |
+| `--loop-fade S` | with `--loop`: blend the clip's last S seconds into its first to hide the join (default 0) |
 | `--noise A` | push each point of the surface up to A frames off the plane with Perlin noise (default 0: flat; see below) |
 | `--noise-size PX` | roughly how far apart the bumps are, in pixels (default 64) |
 | `--noise-speed PX` | how fast the bumps change, in pixels per output frame (default 1; 0 keeps them still) |
@@ -221,7 +222,11 @@ sheared one at any angle but 0°.
 
 The join from the clip's last frame back to its first becomes part of the
 video. Unless the clip already loops, it shows as a tear in time that
-crosses each frame once per loop.
+crosses each frame once per loop. `--loop-fade S` hides it by blending the
+clip's last S seconds into its first S, which makes the loop S seconds
+shorter. Frames in the fade mix two moments, so anything moving shows twice
+as the fade passes, in a band that crosses the frame (at 0°, a plain
+crossfade). The fade can be at most half the clip.
 
 Surface noise loops too: after one loop the bumps are back in the shape they
 started in. For that, the noise has to move through a whole number of its
@@ -259,6 +264,8 @@ render's.
   `sample` gives at `surface`'s points.
 - `slice_frame(...)` makes an output frame, with `sample_columns` when the
   surface is flat and `sample_noisy_columns` when it's bumpy.
+- `crossfade(volume, frames)` blends a clip's last frames into its first,
+  in place, for `--loop-fade`.
 - `main()` handles decoding and encoding (via ffmpeg).
 
 `webapp.py` is the web server (Flask), and `web/` holds the page it serves.

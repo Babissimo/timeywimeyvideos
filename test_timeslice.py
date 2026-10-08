@@ -483,6 +483,30 @@ def test_a_loop_only_moves_through_time():
     assert loop("rotate", 30, motion="time").frames == T
 
 
+def test_crossfade_spreads_the_join_round_the_loop():
+    # A clip that brightens steadily jumps back from 120 to 0 when played on
+    # repeat. Faded over 4 frames, the jump is shared out in small steps.
+    ramp = np.broadcast_to(np.arange(13, dtype=np.uint8)[:, None, None, None] * 10,
+                           (13, 2, 2, 3)).copy()
+    looped = timeslice.crossfade(ramp, 4)
+    assert len(looped) == 9
+    levels = looped[:, 0, 0, 0].astype(int)
+    assert list(levels) == [72, 64, 56, 48, 40, 50, 60, 70, 80]
+    steps = np.abs(np.diff(np.append(levels, levels[0])))
+    assert steps.max() <= 10
+
+
+def test_crossfade_only_changes_the_frames_it_blends():
+    looped = timeslice.crossfade(long_volume.copy(), 3)
+    assert np.array_equal(looped[3:], long_volume[3:10])
+    for i in range(3):
+        w = (i + 1) / 4
+        mixed = long_volume[10 + i] * (1 - w) + long_volume[i] * w
+        assert np.abs(looped[i] - mixed).max() <= 0.5
+    assert np.array_equal(timeslice.crossfade(long_volume.copy(), 0), long_volume)
+    raises(ValueError, timeslice.crossfade, long_volume.copy(), 7)  # over half of 13
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

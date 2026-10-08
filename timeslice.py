@@ -147,6 +147,27 @@ def load_video(path, scale=1.0, time_scale=1.0, start=None, duration=None,
     return volume[:n], fps
 
 
+def crossfade(volume, frames):
+    """Blend the last `frames` frames of a (T, H, W, C) volume into its first,
+    in place, and return the first T - frames: a clip that runs on smoothly
+    from its end into its start when time runs round in a ring.
+
+    Frame i of the fade mixes the clip's frame i with frame T - frames + i,
+    as far past the loop's end as frame i is past its start, taking more of
+    frame i the further in it is. The fade can be at most half the clip.
+    """
+    length = len(volume) - frames
+    if not 0 <= frames <= length:
+        raise ValueError(f"a {frames}-frame fade doesn't fit in a "
+                         f"{len(volume)}-frame clip: it can be at most half")
+    for i in range(frames):
+        w = np.float32((i + 1) / (frames + 1))  # float32 halves the frame-sized temporaries
+        mixed = volume[length + i] * (1 - w)
+        mixed += volume[i] * w
+        volume[i] = (mixed + 0.5).astype(np.uint8)  # rounded, as the samplers do
+    return volume[:length]
+
+
 def open_writer(path, width, height, fps, preset="medium", crf=18):
     """Start an ffmpeg process that encodes raw RGB frames written to its stdin."""
     cmd = ["ffmpeg", "-v", "error", "-y",
@@ -799,6 +820,10 @@ def main():
                         help="make a seamless loop: time runs round in a ring, "
                              "the first frame following the last, and a frame "
                              "the input's width goes once round it")
+    parser.add_argument("--loop-fade", type=float, metavar="S",
+                        help="with --loop: blend the clip's last S seconds into "
+                             "its first, so the join from its end back to its "
+                             "start doesn't show (default 0)")
     parser.add_argument("--noise", type=float, default=0.0, metavar="A",
                         help="push each point of the slicing surface up to A "
                              "frames off the plane with Perlin noise (default "
@@ -836,6 +861,10 @@ def main():
         parser.error("--inside and --motion don't apply to --loop: a looping "
                      "frame always stays inside the video and moves straight "
                      "through time")
+    if args.loop_fade is not None and not args.loop:
+        parser.error("--loop-fade needs --loop")
+    if (args.loop_fade or 0) < 0:
+        parser.error("--loop-fade can't be negative")
     if args.motion and not args.inside:
         parser.error("--motion needs --inside: without it the frame already "
                      "holds the plane's whole cut through the video, so moving "
@@ -864,6 +893,14 @@ def main():
     n_frames, height, width, _ = volume.shape
     print(f"Loaded {n_frames} frames of {width}x{height} "
           f"({volume.nbytes / 1e9:.2f} GB in memory)")
+    if args.loop_fade:
+        rate = float(fps) * shrink  # of the frames loaded
+        fade = round(args.loop_fade * rate)
+        if 2 * fade > n_frames:
+            sys.exit(f"--loop-fade can be at most half the clip, "
+                     f"{n_frames / 2 / rate:.3g} s.")
+        volume = crossfade(volume, fade)
+        n_frames = len(volume)
 
     try:
         sweep = plan_sweep(n_frames, width, args.slice, args.angle, args.inside,
