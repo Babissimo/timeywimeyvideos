@@ -1,4 +1,4 @@
-/** GLSL ES 3.00 sources for slicing a volume. */
+/** GLSL ES 3.00 sources for slicing a volume and crossfading it. */
 
 /** One triangle covering the viewport, corners (-1, -1), (3, -1) and (-1, 3). */
 export const COVER = `#version 300 es
@@ -139,6 +139,42 @@ void main() {
   }
   colour = blend(voxel(ts.x, row, xs.x), voxel(ts.x, row, xs.y),
                  voxel(ts.y, row, xs.x), voxel(ts.y, row, xs.y), w);
+}`;
+
+/**
+ * One frame of a crossfade, as timeslice.crossfade works it out in float32: slice i of the
+ * fade, at w of itself and 1 - w of slice i + past, rounded by adding 0.5 and truncating.
+ * Each texel drawn holds four voxels of a row, each as a uint whose bytes are its levels.
+ */
+export const CROSSFADE = `${HEADER}${VOXEL}
+uniform highp sampler2D weights;  // for slice i: w and 1 - w
+uniform int layer;                // the frame drawn
+uniform ivec2 past;               // (t, x) from slice i to the slice it takes over from
+uniform bool across;              // slice i is the frame's column i, not the frame
+uniform int width;                // the columns faded in each row
+uniform int zero;                 // always 0, which the compiler can't know
+out uvec4 colour;                 // at texel (j, y), voxels 4j to 4j + 3 of row y
+
+// x as it is, though the compiler can't tell, so it rounds each product on its own as numpy
+// does, where it might otherwise fuse one into a multiply-add.
+vec4 rounded(vec4 x) {
+  return intBitsToFloat(floatBitsToInt(x) ^ zero);
+}
+
+// Voxel (layer, y, x) faded, its levels as a uint's bytes, R the lowest; 0 past the width.
+uint faded(int y, int x) {
+  if (x >= width) return 0u;
+  vec2 w = texelFetch(weights, ivec2(across ? x : layer, 0), 0).xy;
+  vec4 mixed = rounded(vec4(voxel(layer + past.x, y, x + past.y)) * w.y);
+  mixed = rounded(mixed + rounded(vec4(voxel(layer, y, x)) * w.x));
+  uvec4 level = min(uvec4(floor(mixed + 0.5)), 255u);
+  return level.r | level.g << 8 | level.b << 16 | level.a << 24;
+}
+
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  int x = 4 * p.x;
+  colour = uvec4(faded(p.y, x), faded(p.y, x + 1), faded(p.y, x + 2), faded(p.y, x + 3));
 }`;
 
 /** The slice scaled to the canvas, nearest pixel, its first row at the top. */

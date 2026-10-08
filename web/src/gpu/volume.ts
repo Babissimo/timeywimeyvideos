@@ -1,4 +1,6 @@
 /** A clip held on the GPU as one RGBA8 TEXTURE_2D_ARRAY: texel (x, y, layer) is voxel (t, y, x). */
+import { bind, dataTexture, fill, framebuffer, program } from "./gl";
+import { COVER, CROSSFADE } from "./shaders";
 
 /** The clip needs more of the GPU than it can give. */
 export class VolumeTooLarge extends Error {
@@ -12,8 +14,8 @@ export class VolumeTooLarge extends Error {
 }
 
 export class Volume {
-  readonly gl: WebGL2RenderingContext;
-  readonly texture: WebGLTexture;
+  private readonly gl: WebGL2RenderingContext;
+  readonly texture: WebGLTexture;  // for the slicer to read
   readonly height: number;
   readonly bytes: number;
   private readonly storedWidth: number;
@@ -78,6 +80,80 @@ export class Volume {
     else
       gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, t, width, height, 1, gl.RGBA,
                        gl.UNSIGNED_BYTE, pixels);
+  }
+
+  /**
+   * Blend the last n frames into the first, in place, and drop them, as timeslice.crossfade
+   * does: a clip that runs on smoothly from its end into its start when time runs round in
+   * a ring. With axis 2 it blends the last n columns into the first instead, for when x
+   * wraps round too. The fade can be at most half the clip.
+   */
+  crossfade(n: number, axis: 0 | 2): void {
+    const size = axis === 0 ? this.frames : this.width;
+    const length = size - n;
+    if (!Number.isInteger(n))
+      throw new RangeError(`a fade has to be a whole number of `
+                           + `${axis === 0 ? "frames" : "columns"}, not ${n}`);
+    if (!(0 <= n && n <= length))
+      throw new Error(`a fade of ${n} doesn't fit in a clip ${size} long: it can be at most half`);
+    if (n > 0) this.fade(n, length, axis);
+    this.size = axis === 0 ? { frames: length, width: this.width }
+                           : { frames: this.frames, width: length };
+  }
+
+  private fade(n: number, length: number, axis: 0 | 2): void {
+    const { gl, height } = this;
+    const weights = new Float32Array(2 * n);
+    for (let i = 0; i < n; i++) {
+      const w = Math.fround((i + 1) / (n + 1));  // as numpy rounds them
+      weights.set([w, Math.fround(1 - w)], 2 * i);
+    }
+    const shader = program(gl, COVER, CROSSFADE, { volume: 0, weights: 1 },
+                           ["layer", "past", "across", "width", "zero"]);
+    const weighting = dataTexture(gl);
+    fill(gl, weighting, gl.RG32F, n, 1, weights);
+    // A texture can't be drawn into while it is read, so each frame is drawn into a scratch
+    // texture, read out and uploaded back. The scratch is an integer one, which keeps each
+    // level as the shader rounded it, where a normalised one would convert it from a float that
+    // GLES lets round to either neighbour. It holds four voxels to an RGBA32UI texel, as every
+    // implementation reads unsigned integers out as 32 bits. The levels pass through memory,
+    // not a pixel buffer: Chrome here can upload from a pixel buffer before a read into it
+    // has landed.
+    const [width, frames] = axis === 0 ? [this.width, n] : [n, this.frames];
+    const texels = Math.ceil(width / 4);
+    const scratch = dataTexture(gl);
+    fill(gl, scratch, gl.RGBA32UI, texels, height, null);
+    const target = framebuffer(gl, scratch);
+    const levels = new Uint32Array(4 * texels * height);
+    // The same memory as bytes, each uint's lowest first, as on every platform WebGL runs on.
+    const bytes = new Uint8Array(levels.buffer);
+    const vao = gl.createVertexArray();
+    gl.useProgram(shader.program);
+    gl.uniform2i(shader.uniforms.past, axis === 0 ? length : 0, axis === 2 ? length : 0);
+    gl.uniform1i(shader.uniforms.across, Number(axis === 2));
+    gl.uniform1i(shader.uniforms.width, width);
+    gl.uniform1i(shader.uniforms.zero, 0);
+    bind(gl, 1, weighting);
+    bind(gl, 0, this.texture, gl.TEXTURE_2D_ARRAY);  // left active, for the upload
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target);
+    gl.viewport(0, 0, texels, height);
+    gl.bindVertexArray(vao);
+    gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 4 * texels);
+    for (let layer = 0; layer < frames; layer++) {
+      gl.uniform1i(shader.uniforms.layer, layer);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.readPixels(0, 0, texels, height, gl.RGBA_INTEGER, gl.UNSIGNED_INT, levels);
+      gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, layer, width, height, 1, gl.RGBA,
+                       gl.UNSIGNED_BYTE, bytes);
+    }
+    gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.deleteVertexArray(vao);
+    gl.deleteFramebuffer(target);
+    gl.deleteTexture(scratch);
+    gl.deleteTexture(weighting);
+    gl.deleteProgram(shader.program);
   }
 
   dispose(): void {

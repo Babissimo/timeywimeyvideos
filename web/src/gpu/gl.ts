@@ -65,6 +65,7 @@ function layout(gl: WebGL2RenderingContext, internalFormat: GLenum): [GLenum, GL
     case gl.R32F: return [gl.RED, gl.FLOAT];
     case gl.RG32F: return [gl.RG, gl.FLOAT];
     case gl.RGBA32F: return [gl.RGBA, gl.FLOAT];
+    case gl.RGBA32UI: return [gl.RGBA_INTEGER, gl.UNSIGNED_INT];
     case gl.R32I: return [gl.RED_INTEGER, gl.INT];
     case gl.RGBA32I: return [gl.RGBA_INTEGER, gl.INT];
     case gl.RGBA8: return [gl.RGBA, gl.UNSIGNED_BYTE];

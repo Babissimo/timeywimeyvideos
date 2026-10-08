@@ -1,5 +1,5 @@
-import { afterAll, describe, expect, onTestFinished, test } from "vitest";
-import { clips, readFrame, rgba, upload } from "./fixture";
+import { afterAll, describe, expect, onTestFinished, test, vi } from "vitest";
+import { clips, crossfadeCases, readFrame, rgba, Tally, upload } from "./fixture";
 import { Volume, VolumeTooLarge } from "./volume";
 
 const gl = document.createElement("canvas").getContext("webgl2")!;
@@ -64,5 +64,86 @@ describe("Volume", () => {
     expect((error as Error).message).toContain(`${(layers * size * size * 4 / 1e9).toFixed(2)} GB`);
     expect(own.isContextLost()).toBe(false);
     expect(own.getError()).toBe(own.NO_ERROR);
+  });
+});
+
+describe("crossfade matches timeslice.crossfade", () => {
+  for (const { name, clip, n, axis, faded } of crossfadeCases) {
+    test(name, () => {
+      const volume = upload(gl, clip);
+      volume.crossfade(n, axis);
+      const frames = axis === 0 ? clip.frames - n : clip.frames;
+      const width = axis === 2 ? clip.width - n : clip.width;
+      expect([volume.frames, volume.height, volume.width]).toEqual([frames, clip.height, width]);
+      const blended = new Tally(), kept = new Tally();
+      for (let t = 0; t < frames; t++) {
+        const out = readFrame(gl, volume, t);
+        for (let y = 0; y < clip.height; y++)
+          for (let x = 0; x < width; x++) {
+            const pixel = out.subarray(4 * (y * width + x), 4 * (y * width + x + 1));
+            if (axis === 0 ? t < n : x < n) {
+              // faded is (n, H, W) or (T, H, n)
+              const q = (t * clip.height + y) * (axis === 0 ? clip.width : n) + x;
+              blended.add(pixel, faded.subarray(3 * q, 3 * q + 3));
+            } else {
+              const q = (t * clip.height + y) * clip.width + x;
+              kept.add(pixel, clip.rgb.subarray(3 * q, 3 * q + 3));
+            }
+          }
+      }
+      volume.dispose();
+      console.log(`${name}\n  blended: ${blended.summary}\n  kept: ${kept.summary}`);
+      expect(blended.maxDiff).toBeLessThanOrEqual(1);
+      expect(kept.identical).toBe(kept.channels);
+      expect(blended.translucent + kept.translucent).toBe(0);
+    });
+  }
+
+  test("takes a whole number of frames or columns", () => {
+    const volume = upload(gl, clips.long);
+    const half = () => volume.crossfade(2.5, 0);
+    expect(half).toThrow(RangeError);
+    expect(half).toThrow("a fade has to be a whole number of frames, not 2.5");
+    expect(() => volume.crossfade(0.5, 2))
+      .toThrow("a fade has to be a whole number of columns, not 0.5");
+    expect([volume.frames, volume.width]).toEqual([13, 5]);
+    volume.dispose();
+  });
+
+  test("fades through memory, not a pixel buffer", () => {
+    // Chrome here has uploaded from a pixel buffer before a read into it landed. That shows
+    // only on the first fade of a session ("tall columns" above, run on its own), so this
+    // holds the fade to the route that can't race.
+    const volume = upload(gl, clips.small);
+    const bindBuffer = vi.spyOn(gl, "bindBuffer");
+    volume.crossfade(3, 2);
+    const pixelBuffers: GLenum[] = [gl.PIXEL_PACK_BUFFER, gl.PIXEL_UNPACK_BUFFER];
+    expect(bindBuffer.mock.calls.filter(([target]) => pixelBuffers.includes(target))).toEqual([]);
+    bindBuffer.mockRestore();
+    volume.dispose();
+  });
+
+  test("leaves no GL error, and uploads working as before", () => {
+    const clip = clips.small;
+    const volume = upload(gl, clip);
+    volume.crossfade(2, 0);
+    expect(gl.getError()).toBe(gl.NO_ERROR);
+    volume.upload(4, rgba(clip, 0));
+    expect(readFrame(gl, volume, 4)).toEqual(rgba(clip, 0));
+    volume.dispose();
+  });
+
+  test("takes at most half the clip", () => {
+    const volume = upload(gl, clips.long);
+    expect(() => volume.crossfade(7, 0))
+      .toThrow("a fade of 7 doesn't fit in a clip 13 long: it can be at most half");
+    expect(() => volume.crossfade(3, 2))
+      .toThrow("a fade of 3 doesn't fit in a clip 5 long: it can be at most half");
+    expect(() => volume.crossfade(-1, 0))
+      .toThrow("a fade of -1 doesn't fit in a clip 13 long: it can be at most half");
+    volume.crossfade(0, 0);
+    expect([volume.frames, volume.width]).toEqual([13, 5]);
+    for (let t = 0; t < 13; t++) expect(readFrame(gl, volume, t)).toEqual(rgba(clips.long, t));
+    volume.dispose();
   });
 });

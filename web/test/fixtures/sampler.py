@@ -1,10 +1,11 @@
 """Write sampler.json: what timeslice.py's samplers give, for the GPU slicer's tests.
 
-Three volumes: the two random ones from test_timeslice.py, stored, and a larger one
-whose voxels both sides work out from FORMULA, so it needn't be. For a spread of
+Four volumes: the two random ones from test_timeslice.py, stored, and two larger ones
+whose voxels both sides work out from FORMULA, so they needn't be. For a spread of
 sweeps, each case holds the columns (t, x) the planner gives for some of its frames,
 the noise grid and push where the sweep is noisy, and what slice_frame makes of them
-with nearest off and on.
+with nearest off and on; a few sweep a volume crossfaded first, as a loop's fades leave
+it. The crossfades hold the slices a fade blends.
 
 Arrays are base64: uint8 as is, float64 and int32 little-endian.
 
@@ -26,6 +27,7 @@ from test_timeslice import long_volume, volume  # noqa: E402
 
 FORMULA = "(t*131 + y*71 + x*37 + c*17 + (t*x) % 23) % 256"
 BIG_SHAPE = (200, 4, 300)
+TALL_SHAPE = (40, 48, 64)
 
 
 def formula_volume(frames, height, width):
@@ -33,13 +35,15 @@ def formula_volume(frames, height, width):
     return ((t * 131 + y * 71 + x * 37 + c * 17 + (t * x) % 23) % 256).astype(np.uint8)
 
 
-VOLUMES = {"small": volume, "long": long_volume, "big": formula_volume(*BIG_SHAPE)}
+VOLUMES = {"small": volume, "long": long_volume, "big": formula_volume(*BIG_SHAPE),
+           "tall": formula_volume(*TALL_SHAPE)}
 Noise = timeslice.Noise
 SMALL_NOISE = Noise(1.5, size=3.0, speed=0.6, seed=1)  # a node at every pixel
 BIG_NOISE = Noise(4.0, size=40.0, speed=2.0, seed=3)
 SIDEWAYS = Noise(6.0, size=64.0, direction="perpendicular", seed=2)
 
-# name, volume, slice, angle, plan_sweep options
+# name, volume, slice, angle, plan_sweep options, and optionally the frames and columns
+# crossfaded first, as --loop-fade and --loop-side-fade do
 SWEEPS = [
     ("rotate 30", "small", "rotate", 30, {}),
     ("rotate 90", "small", "rotate", 90, {}),
@@ -75,6 +79,23 @@ SWEEPS = [
     ("big noise loop rotate 20", "big", "rotate", 20, {"loop": True, "noise": BIG_NOISE}),
     ("big noise loop sides rotate 60", "big", "rotate", 60,
      {"loop": True, "sides": True, "motion": "perpendicular", "noise": SIDEWAYS}),
+    ("crossfaded loop rotate 30", "small", "rotate", 30, {"loop": True}, (2, 0)),
+    ("crossfaded loop sides rotate 70", "small", "rotate", 70,
+     {"loop": True, "sides": True, "motion": "perpendicular"}, (2, 3)),
+    ("crossfaded noise loop sides rotate 70", "small", "rotate", 70,
+     {"loop": True, "sides": True, "motion": "perpendicular",
+      "noise": SMALL_NOISE._replace(direction="perpendicular")}, (2, 3)),
+]
+
+# name, volume, n, axis
+CROSSFADES = [
+    ("tall columns", "tall", 6, 2),  # first: a fade's readback is slowest the first time
+    ("small frames", "small", 3, 0),
+    ("small columns", "small", 5, 2),
+    ("long frames", "long", 6, 0),
+    ("long columns", "long", 2, 2),
+    ("big frames", "big", 8, 0),
+    ("big columns", "big", 12, 2),
 ]
 
 
@@ -91,12 +112,17 @@ def frames_of(sweep, name):
     return sorted({round(i * (sweep.frames - 1) / 11) for i in range(12)})
 
 
-def slice_case(name, vol_name, kind, angle, options):
+def slice_case(name, vol_name, kind, angle, options, fade=None):
     vol = VOLUMES[vol_name]
+    if fade is not None:
+        frames, columns = fade
+        vol = timeslice.crossfade(timeslice.crossfade(vol.copy(), frames), columns, axis=2)
     sweep = timeslice.plan_sweep(len(vol), vol.shape[2], kind, angle, **options)
     noise = options.get("noise")
     case = {"name": name, "volume": vol_name, "wrap": sweep.loop, "wrapX": sweep.sides,
             "width": sweep.width, "frames": []}
+    if fade is not None:
+        case["fade"] = list(fade)
     if noise is not None:
         noise = timeslice._looping(noise, sweep)
         # Only the nodes change from frame to frame.
@@ -118,13 +144,21 @@ def slice_case(name, vol_name, kind, angle, options):
     return case
 
 
+def crossfade_case(name, vol_name, n, axis):
+    faded = timeslice.crossfade(VOLUMES[vol_name].copy(), n, axis)
+    blended = faded[:n] if axis == 0 else faded[:, :, :n]
+    return {"name": name, "volume": vol_name, "n": n, "axis": axis,
+            "faded": b64(blended, "u1")}
+
+
 def main():
     fixture = {
         "formula": FORMULA,
         "volumes": {name: {"shape": list(vol.shape[:3])} for name, vol in VOLUMES.items()},
         "slices": [slice_case(*sweep) for sweep in SWEEPS],
+        "crossfades": [crossfade_case(*fade) for fade in CROSSFADES],
     }
-    for name in ("small", "long"):  # the big volume comes from FORMULA
+    for name in ("small", "long"):  # the others come from FORMULA
         fixture["volumes"][name]["rgb"] = b64(VOLUMES[name], "u1")
     path = Path(__file__).with_name("sampler.json")
     path.write_text(json.dumps(fixture, indent=1) + "\n")

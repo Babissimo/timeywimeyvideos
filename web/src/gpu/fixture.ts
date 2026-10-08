@@ -17,7 +17,13 @@ export interface SliceFrame {
 
 export interface SliceCase {
   name: string; clip: Clip; wrap: boolean; wrapX: boolean; width: number; noisy: boolean;
+  fade: [number, number];  // the frames, then the columns, crossfaded before the sweep
   frames: SliceFrame[];
+}
+
+/** What timeslice.crossfade makes of a clip: the n slices along the axis it blends. */
+export interface CrossfadeCase {
+  name: string; clip: Clip; n: number; axis: 0 | 2; faded: Uint8Array;
 }
 
 interface RawFrame {
@@ -30,7 +36,8 @@ interface RawNoise {
 interface RawFixture {
   volumes: Record<string, { shape: [number, number, number]; rgb?: string }>;
   slices: { name: string; volume: string; wrap: boolean; wrapX: boolean; width: number;
-            noise?: RawNoise; frames: RawFrame[] }[];
+            fade?: [number, number]; noise?: RawNoise; frames: RawFrame[] }[];
+  crossfades: { name: string; volume: string; n: number; axis: 0 | 2; faded: string }[];
 }
 
 function bytes(base64: string): Uint8Array {
@@ -43,7 +50,7 @@ function bytes(base64: string): Uint8Array {
 const float64 = (base64: string) => new Float64Array(bytes(base64).buffer);
 const int32 = (base64: string) => new Int32Array(bytes(base64).buffer);
 
-/** The fixture's large clip, whose voxels are (t*131 + y*71 + x*37 + c*17 + (t*x) % 23) % 256. */
+/** A fixture clip whose voxels are (t*131 + y*71 + x*37 + c*17 + (t*x) % 23) % 256. */
 function formulaClip(frames: number, height: number, width: number): Clip {
   const rgb = new Uint8Array(frames * height * width * 3);
   let i = 0;
@@ -75,7 +82,7 @@ function noise(raw: RawNoise, frame: RawFrame): SliceFrame["noise"] {
 
 export const sliceCases: SliceCase[] = fixture.slices.map((c) => ({
   name: c.name, clip: clips[c.volume], wrap: c.wrap, wrapX: c.wrapX, width: c.width,
-  noisy: c.noise !== undefined,
+  noisy: c.noise !== undefined, fade: c.fade ?? [0, 0],
   frames: c.frames.map((frame) => ({
     f: frame.f,
     columns: { t: float64(frame.t), x: float64(frame.x) },
@@ -83,6 +90,10 @@ export const sliceCases: SliceCase[] = fixture.slices.map((c) => ({
     bilinear: bytes(frame.bilinear),
     nearest: bytes(frame.nearest),
   })),
+}));
+
+export const crossfadeCases: CrossfadeCase[] = fixture.crossfades.map((c) => ({
+  name: c.name, clip: clips[c.volume], n: c.n, axis: c.axis, faded: bytes(c.faded),
 }));
 
 /** Frame t of a clip as opaque RGBA, rows top-first. */

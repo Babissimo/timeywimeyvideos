@@ -15,6 +15,8 @@ afterAll(() => {
 /** Slice every frame of a case both ways, tallying how closely each matches. */
 function tally(c: SliceCase): { nearest: Tally; bilinear: Tally } {
   const volume = upload(gl, c.clip);
+  volume.crossfade(c.fade[0], 0);
+  volume.crossfade(c.fade[1], 2);
   const nearest = new Tally(), bilinear = new Tally();
   for (const frame of c.frames) {
     const options = { wrap: c.wrap, wrapX: c.wrapX, noise: frame.noise };
