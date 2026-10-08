@@ -62,23 +62,34 @@ Note that `--scale` only resizes the frames and keeps every frame, so it
 changes the cuboid's shape: the same angle gives a different slice at a
 different `--scale`.
 
-## Web front end
+## In a browser
 
-The page is built with npm, which comes with [Node.js](https://nodejs.org/):
+`web/` holds a page that does what `timeslice.py` does in the browser: it
+decodes the clip, slices it on the GPU and encodes the result there. It is
+built with npm, which comes with [Node.js](https://nodejs.org/). To work on
+it, run
 
 ```sh
 npm install
-npm run build
-uv run webapp.py --videos ~/Movies
+npm run dev
 ```
 
-then open <http://127.0.0.1:8000>. Run `npm run build` again after changing
-the page. While working on it, run `npm run dev` beside `uv run webapp.py`
-instead and open the address it prints: it serves the page straight from
-`web/` as you edit it, and passes its requests for videos on to the server.
+and open the address it prints. It serves the page straight from `web/` and
+reloads it as you edit.
 
-The page offers the videos in the folder you name (the top level only;
-`videos/` here by default) and any you upload, which are saved in `uploads/`.
+To host it, run `npm run build` and serve `web/dist/` as static files from
+any web server: on this machine, `npx vite preview`, or
+`python3 -m http.server -b 127.0.0.1 -d web/dist` and then open
+<http://localhost:8000/>. WebCodecs runs only in a secure context, so serve
+the page over HTTPS or open it at `localhost` or `127.0.0.1`; at any other
+plain `http://` address (such as the `http://[::]:8000/` that `http.server`
+prints without `-b`) the page says it can't decode video. Browsers won't run
+its scripts from a file opened straight from disk.
+
+Open videos or drop them onto the page, or open a folder to list the videos
+at its top level (`.mp4`, `.mov`, `.m4v`, `.mkv`, `.webm`, `.avi` and
+`.gif`). The page reads a video where it is, a piece at a time as it needs
+it: nothing is uploaded or copied.
 
 - **Live preview** plays the slice while you change the angle and other
   options. It shows the same frames as `--preview` would render: the browser
@@ -99,20 +110,23 @@ The page offers the videos in the folder you name (the top level only;
   download or remove, until you leave or reload the page, which asks first
   while a render runs or one hasn't been downloaded.
 
-The page needs a browser with WebGL2 and WebCodecs, such as a recent Chrome,
-that can decode the clip's video and encode H.264. The GPU holds the clip as
-luma (brightness) at full size and colour at half size each way, 1.5 bytes for
-every pixel of every frame, in two pieces: the luma's 1 byte a pixel in one,
-the colour in the other. A GPU may give no more than 1 or 2 GB to one piece,
-and holds at most so many frames in one (2048 on many). The live view and
-previews hold the clip at half size and half the frame rate, a full-quality
-render at full size and every frame, so a full render of 30 fps 1080p video
-runs out of room at some 20 to 30 seconds of it. The page says when a clip
-needs more than the GPU can give; set a duration or scale to use part of a
-long video, or render it with `timeslice.py`, whose command the page shows.
-It shows the command too for a file the browser can't open, such as an AVI or
-a GIF, or whose video it can't decode. The server only listens on this
-machine unless you pass `--host`.
+The page needs a browser with WebGL2 and WebCodecs, such as a recent Chrome
+or Edge, that can decode the clip's video and encode H.264. Opening a folder
+needs Chrome or Edge too; in other browsers, open or drop the videos
+themselves.
+
+The GPU holds the clip as luma (brightness) at full size and colour at half
+size each way, 1.5 bytes for every pixel of every frame, in two pieces: the
+luma's 1 byte a pixel in one, the colour in the other. A GPU may give no more
+than 1 or 2 GB to one piece, and holds at most so many frames in one (2048 on
+many). The live view and previews hold the clip at half size and half the
+frame rate, a full-quality render at full size and every frame, so a full
+render of 30 fps 1080p video runs out of room at some 20 to 30 seconds of it.
+The page says when a clip needs more than the GPU can give. Set a duration or
+scale to use part of a long video, or render it with `timeslice.py` (see
+[Usage](#usage)), which holds the clip in the computer's memory rather than
+the GPU's. The page shows the command, as it does for a file the browser can't
+open, such as an AVI or a GIF, or whose video it can't decode.
 
 ## How the angle works
 
@@ -322,10 +336,12 @@ it PX narrower (after `--scale`). Like `--loop-fade`, it can be at most half.
   first, for `--loop-side-fade`.
 - `main()` handles decoding and encoding (via ffmpeg).
 
-`webapp.py` is the web server (Flask), and `web/` holds the page it serves.
-The page's live view and renders are TypeScript in `web/src/`, which decodes,
-slices and encodes clips the way `timeslice.py` does.
+`web/app.js` runs the page, and the TypeScript in `web/src/` decodes, slices
+and encodes clips the way `timeslice.py` does.
 
-Run the geometry checks with `uv run test_timeslice.py`, and the server's with
-`uv run test_webapp.py` (or run both with `uv run pytest`). `npm test` runs the
-page's checks, some of them in Chrome.
+Run the geometry checks with `uv run pytest` (or `uv run test_timeslice.py`).
+`npm test` runs the page's checks, some of them in Google Chrome, which has to
+be installed. `npm run typecheck` checks the TypeScript. The page's checks
+compare it with `timeslice.py`, through reference values the scripts in
+`web/test/fixtures/` make from it; run one with
+`uv run python web/test/fixtures/<name>.py` to make its values afresh.
