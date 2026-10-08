@@ -45,7 +45,10 @@ export interface Options {
   sideFade: number;
 }
 
-/** What a full-quality render with some options would make. */
+/**
+ * What a full-quality render with some options would make, and the GPU memory its clip takes,
+ * held in YUV 4:2:0.
+ */
 export interface FullSize { width: number; height: number; frames: number; seconds: number;
                             memory: number }
 
@@ -271,6 +274,8 @@ export function fullSize(clip: ClipInfo, opts: Options): FullSize | { error: str
     throw error;
   }
   const out = opts.fps ?? clip.fps;
+  // Luma a byte a pixel, and Cb and Cr a byte each for every 2×2 block.
+  const memory = nFrames * (height * width + 2 * Math.ceil(height / 2) * Math.ceil(width / 2));
   return { width: sweep.width, height, frames: sweep.frames,
-           seconds: sweep.frames * out.den / out.num, memory: nFrames * height * width * 3 };
+           seconds: sweep.frames * out.den / out.num, memory };
 }

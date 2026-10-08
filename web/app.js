@@ -1,8 +1,9 @@
-// The page for webapp.py: choose a source, set the slice, watch it play live
-// (sliced here, on the GPU), see where the slice sits in the cuboid, and run
-// renders.
+// The page for webapp.py: choose a source, set the slice, watch it play live,
+// see where the slice sits in the cuboid, and render it. The live view and the
+// renders are sliced here, on the GPU.
 
-import { Live } from "./src/live.ts";
+import { fetchSource, Live } from "./src/live.ts";
+import { handOver, render as renderClip } from "./src/render.ts";
 
 const $ = (id) => document.getElementById(id);
 
@@ -212,7 +213,7 @@ function describe() {
   $("estimate").classList.toggle("error", Boolean(full && full.error));
   $("estimate").textContent = !full ? "" : full.error ? `At full size: ${full.error}` :
     `Full quality makes ${full.width}×${full.height}, ${full.frames} frames ` +
-    `(${seconds(full.seconds)}), holding ${bytes(full.memory)} of video in memory.`;
+    `(${seconds(full.seconds)}), holding ${bytes(full.memory)} of video on the GPU.`;
 }
 
 // Playback runs on the clock: each animation frame works out which output
@@ -411,11 +412,14 @@ async function chooseSource(source) {
   }
   try {
     const info = await getJSON("/api/info?" + new URLSearchParams({ source }));
-    const name = source.slice(source.indexOf("/") + 1);
+    const slash = source.indexOf("/");
+    const [kind, name] = [source.slice(0, slash), source.slice(slash + 1)];
+    // A new address each time, as an upload of the same name replaces the file.
+    const original = () => `/media/${kind}/${encodeURIComponent(name)}?v=${Date.now()}`;
     $("source-info").replaceChildren(
       `${info.width}×${info.height} · ${Number(info.fps.toFixed(3))} fps` +
       (info.duration ? ` · ${seconds(info.duration)}` : "") + ` · ${bytes(info.size)} · `,
-      link("watch the original", () => watch(source, name)));
+      link("watch the original", () => watch(original(), name)));
   } catch (err) {
     $("source-info").textContent = err.message;
   }
@@ -750,92 +754,129 @@ function setView(name) {
 new ResizeObserver(() => drawCube()).observe(cube);
 
 // ---------------------------------------------------------------------------
-// Renders.
+// Renders, made here one at a time, each in a worker of its own, and kept until
+// the page is left.
 
-let polling = 0;
+let job = null;     // the AbortController of the render under way
+const renders = [];  // newest first: { name, url, size, made, about, saved }
+
+// What each stage of a render says, given how many frames it has done.
+const STAGES = {
+  loading: (done, total) => `Loading the clip · frame ${done} of ${total}`,
+  slicing: (done, total) => `Slicing · frame ${done} of ${total}`,
+  finishing: () => "Finishing",
+};
 
 async function render(preview) {
-  if (!state.source) return;
+  if (!state.source || job) return;
+  const values = options();  // as they are at the click, whatever changes while it fetches
+  const controller = new AbortController();
+  job = controller;
+  const began = performance.now();
+  const kind = preview ? "preview" : "full-quality render";
+  showJob({ running: true, text: "Fetching the clip…" });
   try {
-    showJob(await getJSON("/api/render", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...options(), preview }),
-    }));
-    poll();
+    const file = await fetchSource(values.source, controller.signal);
+    const made = await renderClip(file, values, {
+      preview, signal: controller.signal,
+      progress: ({ stage, done, total }) => showJob({
+        running: true, done: done / total,
+        text: `${STAGES[stage](done, total)} · ${seconds((performance.now() - began) / 1000)}`,
+      }),
+    });
+    const took = (performance.now() - began) / 1000;
+    const item = keep(made);
+    showJob({ done: 1, text: `Made ${made.seconds.toFixed(1)} s of video in ${seconds(took)} ` +
+                             `(${kind}).` });
+    watch(item.url, item.name);
   } catch (err) {
-    showJob({ state: "failed", message: err.message });
+    if (err.name === "AbortError") showJob({ text: "Cancelled." });
+    else if (err.command) showJob({ error: true, text: handOver(err), command: err.command });
+    else showJob({ error: true, text: err.message });
+  } finally {
+    job = null;
   }
 }
 
-function poll() {
-  clearTimeout(polling);
-  polling = setTimeout(async () => {
-    let job;
-    try {
-      job = await getJSON("/api/render");
-    } catch {
-      return poll();  // try again
-    }
-    showJob(job);
-    if (job.state === "running") return poll();
-    if (job.state === "done") {
-      await loadRenders();
-      watch(`renders/${job.output}`, job.output);
-    }
-  }, 400);
-}
-
-function showJob(job) {
-  const running = job.state === "running";
+// What the render panel shows: whether one is running, how far through (0 to 1),
+// what it says, and for a clip the browser can't render, timeslice.py's command.
+function showJob({ running = false, done = 0, text = "", error = false, command }) {
   $("render-preview").disabled = running;
   $("render-full").disabled = running;
-  $("job").hidden = job.state === "idle";
+  $("job").hidden = false;
   $("cancel").hidden = !running;
-  const done = running && job.frames ? job.frame / job.frames : job.state === "done" ? 1 : 0;
   $("job-bar").style.width = `${100 * done}%`;
-  $("job-text").classList.toggle("error", job.state === "failed");
-  const kind = job.preview ? "preview" : "full-quality render";
-  $("job-text").textContent =
-    running ? `${job.stage}${job.frames ? ` · frame ${job.frame} of ${job.frames}` : "…"}` +
-              ` · ${seconds(job.elapsed || 0)}` :
-    job.state === "done" ? `${job.message || "Done"} (${kind}).` :
-    job.state === "cancelled" ? "Cancelled." :
-    job.message || "";
+  $("job-text").classList.toggle("error", error);
+  $("job-text").textContent = text;
+  $("job-command").hidden = !command;
+  $("job-command").textContent = command || "";
 }
 
 $("render-preview").addEventListener("click", () => render(true));
 $("render-full").addEventListener("click", () => render(false));
-$("cancel").addEventListener("click", async () => showJob(await getJSON("/api/render/cancel", { method: "POST" })));
+$("cancel").addEventListener("click", () => job?.abort());
 
-async function loadRenders() {
+// Leaving the page loses a render under way and every render not yet downloaded.
+window.addEventListener("beforeunload", (event) => {
+  if (job || renders.some((r) => !r.saved)) event.preventDefault();
+});
+
+// Keep a render in the list, in place of an earlier one of the same name.
+function keep(made) {
+  const earlier = renders.findIndex((r) => r.name === made.name);
+  if (earlier >= 0) URL.revokeObjectURL(renders.splice(earlier, 1)[0].url);
+  const item = {
+    name: made.name, url: URL.createObjectURL(made.video), size: made.video.size,
+    made: new Date(), saved: false,
+    about: `${made.width}×${made.height}, ${made.frames} frames, ${made.rateControl}`,
+  };
+  renders.unshift(item);
+  showRenders();
+  return item;
+}
+
+function showRenders() {
   const list = $("renders");
-  let renders = [];
-  try {
-    renders = await getJSON("/api/renders");
-  } catch { /* leave the list empty */ }
   list.replaceChildren();
   for (const r of renders) {
     const item = document.createElement("li");
-    item.dataset.src = `renders/${r.name}`;
-    const name = link(r.name, () => watch(`renders/${r.name}`, r.name, r.modified));
+    item.dataset.src = r.url;
+    const name = link(r.name, () => watch(r.url, r.name));
     name.classList.add("name");
     const meta = document.createElement("span");
     meta.className = "note";
-    meta.textContent = `${bytes(r.size)} · ${new Date(r.modified * 1000).toLocaleString()}`;
+    meta.textContent = `${bytes(r.size)} · ${r.made.toLocaleTimeString()} · ${r.about}`;
     const download = document.createElement("a");
-    download.href = `/media/renders/${encodeURIComponent(r.name)}`;
+    download.href = r.url;
     download.download = r.name;
     download.textContent = "Download";
-    item.append(name, meta, download);
+    download.addEventListener("click", () => { r.saved = true; });
+    const remove = link("Remove", () => forget(r));
+    remove.classList.add("remove");
+    item.append(name, meta, download, remove);
     list.append(item);
   }
   if (!renders.length) {
     const item = document.createElement("li");
     item.className = "note";
-    item.textContent = "Nothing rendered yet. Renders are saved in the renders folder.";
+    item.textContent = "Nothing rendered yet. Renders stay here until you leave or reload " +
+      "the page, so download the ones to keep.";
     list.append(item);
   }
+  markPlaying();
+}
+
+// Drop a render from the list and let its video go.
+function forget(r) {
+  renders.splice(renders.indexOf(r), 1);
+  if ($("player").src === r.url) {
+    $("player").removeAttribute("src");
+    $("player").load();
+    $("player").hidden = true;
+    $("now-playing").textContent = "";
+  }
+  URL.revokeObjectURL(r.url);
+  showRenders();
 }
 
 function link(text, onclick) {
@@ -846,16 +887,20 @@ function link(text, onclick) {
   return button;
 }
 
-// Play a source ("videos/…", "uploads/…") or render ("renders/…") in the player.
-function watch(src, label, version = Date.now()) {
+// Play a video in the player: a source from the server, or a render.
+function watch(url, label) {
   const player = $("player");
-  const [kind, ...rest] = src.split("/");
   player.hidden = false;
-  player.src = `/media/${kind}/${encodeURIComponent(rest.join("/"))}?v=${version}`;
+  player.src = url;
   player.play().catch(() => { /* autoplay may be blocked; the controls still work */ });
   $("now-playing").textContent = label;
+  markPlaying();
+}
+
+function markPlaying() {
+  const playing = $("player").hidden ? "" : $("player").src;
   for (const item of $("renders").children) {
-    item.classList.toggle("playing", item.dataset.src === src);
+    item.classList.toggle("playing", item.dataset.src === playing);
   }
 }
 
@@ -864,10 +909,8 @@ function watch(src, label, version = Date.now()) {
 async function start() {
   slicesChanged();
   noiseChanged();
-  await Promise.all([loadSources(), loadRenders()]);
-  const job = await getJSON("/api/render");
-  showJob(job);
-  if (job.state === "running") poll();
+  showRenders();
+  await loadSources();
 }
 
 start();
