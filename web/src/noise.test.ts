@@ -148,6 +148,9 @@ describe("surface noise", () => {
     expect({ ...noise.scaled(0.5) }).toEqual({ ...noise, amplitude: 1, size: 16, period: 20 });
     expect({ ...noise.with({ seed: 9 }) }).toEqual({ ...noise, seed: 9 });
     expect(noise.with({ seed: 9 })).toBeInstanceOf(Noise);
+    // A field given as undefined stays as it was.
+    expect({ ...noise.with({ size: undefined, seed: 9, amplitude: undefined }) })
+      .toEqual({ ...noise, seed: 9 });
   });
 
   test("comes back round with a loop", () => {
