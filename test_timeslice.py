@@ -216,22 +216,40 @@ def test_noise_changes_over_the_sweep_unless_its_speed_is_zero():
     assert not np.allclose(moving.field(32, 24, 0), moving.field(32, 24, 9))
 
 
+def test_noise_with_a_period_repeats():
+    for speed in [0.37, 1.0, -0.6, 3.0]:
+        noise = Noise(1, size=8, speed=speed, period=40)
+        first = noise.field(32, 24, 3)
+        assert np.allclose(first, noise.field(32, 24, 43), atol=1e-9), speed
+        assert not np.allclose(first, noise.field(32, 24, 23)), speed
+        # and runs smoothly from the end of one period into the next.
+        step = np.abs(noise.field(32, 24, 1) - noise.field(32, 24, 0)).max()
+        assert np.abs(noise.field(32, 24, 39) - noise.field(32, 24, 0)).max() < 2 * step
+    # The speed is rounded to make that work, but never down to standing still.
+    assert not np.allclose(Noise(1, size=64, speed=0.1, period=40).field(32, 24, 0),
+                           Noise(1, size=64, speed=0.1, period=40).field(32, 24, 20))
+    assert np.array_equal(Noise(1, size=8, speed=0, period=40).field(32, 24, 7),
+                          Noise(1, size=8, speed=0).field(32, 24, 7))
+
+
 def test_preview_noise_is_the_full_noise_at_half_size():
     # Sizes where both work the noise out at nodes, and where both work it
-    # out at every pixel.
+    # out at every pixel, with and without a period.
     for size in [64, 3]:
-        full = Noise(1, size=size, speed=0.75, seed=2)
-        half = full.scaled(0.5)
-        for f in [0, 3, 10]:
-            assert np.array_equal(half.field(80, 60, f),
-                                  full.field(160, 120, 2 * f)[::2, ::2]), size
+        for period in [0, 30]:
+            full = Noise(1, size=size, speed=0.75, seed=2, period=period)
+            half = full.scaled(0.5)
+            for f in [0, 3, 10]:
+                assert np.array_equal(half.field(80, 60, f),
+                                      full.field(160, 120, 2 * f)[::2, ::2]), size
 
 
 def exact_noise(noise, width, height, f):
     """Perlin noise worked out at every pixel, from -1 to 1."""
     out = np.empty((height, width))
     timeslice._noise_grid(timeslice._permutation(noise.seed), np.arange(width) / noise.size,
-                          np.arange(height) / noise.size, f * noise.speed / noise.size, out)
+                          np.arange(height) / noise.size, f * noise.speed / noise.size, 0,
+                          out)
     return out / timeslice.NOISE_BOUND
 
 

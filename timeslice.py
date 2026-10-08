@@ -330,29 +330,35 @@ def _grad(h, x, y, z):
 
 
 @njit(cache=True)
-def _noise3(perm, x, y, z):
+def _noise3(perm, x, y, z, period):
     fx, fy, fz = np.floor(x), np.floor(y), np.floor(z)
-    X, Y, Z = int(fx) & 255, int(fy) & 255, int(fz) & 255
+    X, Y = int(fx) & 255, int(fy) & 255
+    # The lattice planes either side in z. With a period they wrap round
+    # every `period` cells, so the noise repeats along z.
+    Z0, Z1 = int(fz), int(fz) + 1
+    if period:
+        Z0, Z1 = Z0 % period, Z1 % period
+    Z0, Z1 = Z0 & 255, Z1 & 255
     x, y, z = x - fx, y - fy, z - fz
     u, v, w = _fade(x), _fade(y), _fade(z)
     # Hash the 8 corners of the lattice cell around the point.
     a, b = perm[X] + Y, perm[X + 1] + Y
-    aa, ab, ba, bb = perm[a] + Z, perm[a + 1] + Z, perm[b] + Z, perm[b + 1] + Z
-    return _lerp(w, _lerp(v, _lerp(u, _grad(perm[aa], x, y, z),
-                                      _grad(perm[ba], x - 1, y, z)),
-                             _lerp(u, _grad(perm[ab], x, y - 1, z),
-                                      _grad(perm[bb], x - 1, y - 1, z))),
-                    _lerp(v, _lerp(u, _grad(perm[aa + 1], x, y, z - 1),
-                                      _grad(perm[ba + 1], x - 1, y, z - 1)),
-                             _lerp(u, _grad(perm[ab + 1], x, y - 1, z - 1),
-                                      _grad(perm[bb + 1], x - 1, y - 1, z - 1))))
+    aa, ab, ba, bb = perm[a], perm[a + 1], perm[b], perm[b + 1]
+    return _lerp(w, _lerp(v, _lerp(u, _grad(perm[aa + Z0], x, y, z),
+                                      _grad(perm[ba + Z0], x - 1, y, z)),
+                             _lerp(u, _grad(perm[ab + Z0], x, y - 1, z),
+                                      _grad(perm[bb + Z0], x - 1, y - 1, z))),
+                    _lerp(v, _lerp(u, _grad(perm[aa + Z1], x, y, z - 1),
+                                      _grad(perm[ba + Z1], x - 1, y, z - 1)),
+                             _lerp(u, _grad(perm[ab + Z1], x, y - 1, z - 1),
+                                      _grad(perm[bb + Z1], x - 1, y - 1, z - 1))))
 
 
 @njit(parallel=True, cache=True)
-def _noise_grid(perm, xs, ys, z, out):
+def _noise_grid(perm, xs, ys, z, period, out):
     for i in prange(len(ys)):
         for j in range(len(xs)):
-            out[i, j] = _noise3(perm, xs[j], ys[i], z)
+            out[i, j] = _noise3(perm, xs[j], ys[i], z, period)
 
 
 @functools.lru_cache(maxsize=16)
@@ -425,13 +431,16 @@ class Noise(NamedTuple):
     through "time" or "perpendicular" to the plane, in the x-t plane. `size` is
     roughly how far apart the bumps are, in pixels. The bumps change as the
     sweep goes on, `speed` pixels' worth per output frame; 0 keeps one fixed
-    bumpy surface. `seed` picks the pattern.
+    bumpy surface. `seed` picks the pattern. With a `period`, the bumps come
+    back to the same shape every `period` output frames, the speed rounded
+    to the nearest that does so.
     """
     amplitude: float
     size: float = 64.0
     speed: float = 1.0
     direction: str = "time"
     seed: int = 0
+    period: float = 0.0
 
     def push(self, normal):
         """The (t, x) move of a point where the noise is strongest, on a frame
@@ -446,16 +455,22 @@ class Noise(NamedTuple):
         """The same noise on a video shrunk by factor in x, y and t. speed is
         pixels per output frame, and both shrink together, so it stays."""
         return self._replace(amplitude=self.amplitude * factor,
-                             size=self.size * factor)
+                             size=self.size * factor, period=self.period * factor)
 
     def _grid(self, width, height, f):
         """The noise at the nodes for output frame f, from -1 to 1, and how
         to blend it back to each column and row."""
         us, cols, col_w = _nodes(width, self.size)
         vs, rows, row_w = _nodes(height, self.size)
+        z, cells = f * self.speed / self.size, 0
+        if self.period and self.speed:
+            # A whole number of lattice cells per period, for the noise to
+            # wrap round in. At least 2: in a ring of 1 the planes either
+            # side of a cell are the same, so the bumps barely change.
+            cells = max(2, round(self.period * abs(self.speed) / self.size))
+            z = math.copysign(f * cells / self.period, self.speed)
         nodes = np.empty((len(vs), len(us)))
-        _noise_grid(_permutation(self.seed), us, vs, f * self.speed / self.size,
-                    nodes)
+        _noise_grid(_permutation(self.seed), us, vs, z, cells, nodes)
         return nodes / NOISE_BOUND, cols, col_w, rows, row_w
 
     def field(self, width, height, f):

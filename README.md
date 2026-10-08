@@ -220,7 +220,8 @@ against 4.4.
 - `plan_sweep(...)` picks between them.
 - `Noise` is the surface noise: `field(...)` gives its values over a frame,
   blended from points `NOISE_STEPS` to every `size` pixels, and
-  `push(normal)` which way and how far they move a point.
+  `push(normal)` which way and how far they move a point. Given a `period`,
+  it repeats every that many frames.
 - `surface(...)` gives the (t, y, x) position of every pixel of a noisy
   frame, which `sample` can read.
 - `sample_noisy_columns(...)` is a faster way to read a noisy frame: it
