@@ -30,9 +30,11 @@ uv run timeslice.py input.mp4 output.mp4 --angle 30             # final cut
 | `--angle DEG` | tilt of the slicing plane about the y axis (default 45) |
 | `--slice rotate\|shear` | how to read along the tilted plane (default `rotate`; see below) |
 | `--inside` | keep each frame the input's width and entirely inside the video: no black edges |
-| `--motion perpendicular\|time\|longest` | with `--slice rotate --inside`: which way the frame moves (default `longest`) |
+| `--motion perpendicular\|time\|longest` | with `--slice rotate --inside`: which way the frame moves (default `longest`); with `--loop-sides`, `time` (default) or `perpendicular` |
 | `--loop` | make a video that loops seamlessly: time runs round in a ring (see below) |
 | `--loop-fade S` | with `--loop`: blend the clip's last S seconds into its first to hide the join (default 0) |
+| `--loop-sides` | with `--loop`: wrap round the picture's sides too, so the frame can move sideways (see below) |
+| `--loop-side-fade PX` | with `--loop-sides`: blend the picture's last PX columns into its first to hide the seam (default 0) |
 | `--noise A` | push each point of the surface up to A frames off the plane with Perlin noise (default 0: flat; see below) |
 | `--noise-size PX` | roughly how far apart the bumps are, in pixels (default 64) |
 | `--noise-speed PX` | how fast the bumps change, in pixels per output frame (default 1; 0 keeps them still) |
@@ -236,6 +238,32 @@ the bumps barely change. A preview's loop has half as many frames, so where
 the rounding is close it can land on one cell more or fewer than the full
 render's.
 
+### Loops round the sides (`--loop-sides`)
+
+A loop that only wraps time has to move straight through time, since a
+frame drifting sideways would leave the video and never come back. At steep
+angles that is the dull way to move: the frame lies nearly along time, so
+moving through time mostly slides it along itself.
+
+`--loop-sides` wraps x as well, the picture's left edge following its right,
+which makes the clip a torus. `--motion perpendicular` can then move the
+frame straight off itself, as the whole-plane sweep does, and keep going.
+The loop closes once the frame has gone across the width a whole number of
+times and round time a whole number of times, so its direction is nudged to
+the shortest such path within 2° of perpendicular (or the closest, if none
+within 16 times round either way is that close). Loops can be much longer
+than the clip: at 80°, a 6-second clip 320 pixels wide gives a 32-second
+loop, three times across the width and once round time.
+
+With the sides wrapping round, noise can't push the frame out of the video
+either, so perpendicular noise fits at every angle.
+
+The picture's right edge now meets its left, so unless the footage wraps
+round (a 360° panorama, say), a seam shows wherever a frame crosses it.
+`--loop-side-fade PX` hides it the way `--loop-fade` hides the join in
+time, blending the picture's last PX columns into its first PX, which makes
+it PX narrower (after `--scale`). Like `--loop-fade`, it can be at most half.
+
 ## Code layout
 
 `timeslice.py` is split so that new kinds of slices only need new coordinates:
@@ -243,14 +271,15 @@ render's.
 - `sample(volume, t, y, x)` reads the video at any (t, y, x) positions, so it
   works for any surface. Each point blends the 8 voxels around it, weighted
   by closeness (linear interpolation); points outside the cuboid are black.
-  With `wrap`, time runs round in a ring instead, for loops.
+  With `wrap`, time runs round in a ring instead, for loops, and with
+  `wrap_x` so does x.
 - `sample_columns(volume, t, x)` is a faster version for slices made of whole
   source columns, which is what any tilt about the y axis gives. It only
   blends across x and t (4 voxels), or copies the nearest one for previews.
 - `rotation_sweep(...)` and `shear_sweep(...)` plan a sweep: the output size,
   `at(f)`, the (t, x) position of every column of output frame f, the
-  normal of the frame's plane, and whether it loops. Given noise, they make
-  room for it.
+  normal of the frame's plane, and whether it loops, and round the sides
+  too. Given noise, they make room for it.
 - `plan_sweep(...)` picks between them.
 - `Noise` is the surface noise: `field(...)` gives its values over a frame,
   blended from points `NOISE_STEPS` to every `size` pixels, and
@@ -264,8 +293,9 @@ render's.
   `sample` gives at `surface`'s points.
 - `slice_frame(...)` makes an output frame, with `sample_columns` when the
   surface is flat and `sample_noisy_columns` when it's bumpy.
-- `crossfade(volume, frames)` blends a clip's last frames into its first,
-  in place, for `--loop-fade`.
+- `crossfade(volume, n)` blends a clip's last n frames into its first, in
+  place, for `--loop-fade`, or with `axis=2` its last n columns into its
+  first, for `--loop-side-fade`.
 - `main()` handles decoding and encoding (via ffmpeg).
 
 `webapp.py` is the web server (Flask), and `web/` holds the page it serves.
