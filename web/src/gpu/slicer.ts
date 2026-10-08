@@ -3,7 +3,7 @@ import { floorMod } from "../pymath";
 import type { Columns, NoiseGrid } from "../types";
 import { bind, DataTexture, dataTexture, fill, framebuffer, program, type Program } from "./gl";
 import { COVER, FLAT, NOISY, SHOW } from "./shaders";
-import type { Volume } from "./volume";
+import type { Volume, VolumeFormat } from "./volume";
 
 export interface SliceOptions {
   /** Copy the voxel closest to each point rather than blend the four around it. */
@@ -17,6 +17,20 @@ export interface SliceOptions {
    * (t, x) move where the noise is at full strength.
    */
   noise?: { push: [number, number]; grid: NoiseGrid };
+}
+
+// The samplers for a volume's planes, in their order, and the units they read: 0, and 6 past
+// the units 1 to 5 of the textures a slice is worked out from.
+const PLANES: Record<VolumeFormat, [string, number][]> = {
+  rgba: [["volume", 0]],
+  yuv420: [["luma", 0], ["chroma", 6]],
+};
+
+/** A program for volumes of each format, made given the samplers for its planes. */
+function forEachFormat(make: (format: VolumeFormat, planes: Record<string, number>) => Program):
+    Record<VolumeFormat, Program> {
+  const made = (format: VolumeFormat) => make(format, Object.fromEntries(PLANES[format]));
+  return { rgba: made("rgba"), yuv420: made("yuv420") };
 }
 
 // As timeslice._neighbours: for a coordinate floored to lo on an axis of n, the voxel at or
@@ -95,8 +109,8 @@ function sized<T extends Int32Array | Float32Array>(array: T, length: number,
 
 export class Slicer {
   private readonly gl: WebGL2RenderingContext;
-  private readonly flat: Program;
-  private readonly noisy: Program;
+  private readonly flat: Record<VolumeFormat, Program>;
+  private readonly noisy: Record<VolumeFormat, Program>;
   private readonly show: Program;
   private readonly vao: WebGLVertexArrayObject;
   private readonly columns: DataTexture;
@@ -122,10 +136,12 @@ export class Slicer {
     this.gl = gl;
     this.maxSize = Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE) as number,
                             ...(gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array));
-    this.flat = program(gl, COVER, FLAT, { volume: 0, columns: 1 }, ["nearest"]);
-    this.noisy = program(gl, COVER, NOISY,
-                         { volume: 0, columns: 1, offsets: 2, rows: 3, rowWeights: 4, nodes: 5 },
-                         ["push", "size", "nearest", "wrap", "wrapX"]);
+    this.flat = forEachFormat((format, planes) =>
+      program(gl, COVER, FLAT[format], { ...planes, columns: 1 }, ["nearest"]));
+    this.noisy = forEachFormat((format, planes) =>
+      program(gl, COVER, NOISY[format],
+              { ...planes, columns: 1, offsets: 2, rows: 3, rowWeights: 4, nodes: 5 },
+              ["push", "size", "nearest", "wrap", "wrapX"]));
     this.show = program(gl, COVER, SHOW, { slice: 0 }, ["view"]);
     this.vao = gl.createVertexArray();
     this.columns = new DataTexture(gl);
@@ -177,7 +193,7 @@ export class Slicer {
       this.rows.put(gl.R32I, height, 1, grid.rows);
       this.rowWeights.put(gl.RGBA32F, height, 1, this.rowWeightData);
       this.nodes.put(gl.R32F, grid.nodeCols, grid.nodeRows, this.nodeData);
-      const { program, uniforms } = this.noisy;
+      const { program, uniforms } = this.noisy[volume.format];
       gl.useProgram(program);
       gl.uniform2f(uniforms.push, push[0], push[1]);
       gl.uniform2i(uniforms.size, volume.frames, volume.width);
@@ -192,10 +208,13 @@ export class Slicer {
       this.columnData = sized(this.columnData, 16 * width, Int32Array);
       flatColumns(columns, volume.frames, volume.width, nearest, wrap, wrapX, this.columnData);
       this.columns.put(gl.RGBA32I, width, 4, this.columnData);
-      gl.useProgram(this.flat.program);
-      gl.uniform1i(this.flat.uniforms.nearest, Number(nearest));
+      const { program, uniforms } = this.flat[volume.format];
+      gl.useProgram(program);
+      gl.uniform1i(uniforms.nearest, Number(nearest));
     }
-    bind(gl, 0, volume.planes[0].texture, gl.TEXTURE_2D_ARRAY);
+    // Bound after the fill and puts above, which bind to the active unit.
+    PLANES[volume.format].forEach(([, unit], i) =>
+      bind(gl, unit, volume.planes[i].texture, gl.TEXTURE_2D_ARRAY));
     bind(gl, 1, this.columns.texture);
     this.cover(this.framebuffer, width, height);
   }
@@ -224,7 +243,9 @@ export class Slicer {
 
   dispose(): void {
     const { gl } = this;
-    for (const { program } of [this.flat, this.noisy, this.show]) gl.deleteProgram(program);
+    for (const { program } of [...Object.values(this.flat), ...Object.values(this.noisy),
+                               this.show])
+      gl.deleteProgram(program);
     for (const data of [this.columns, this.offsets, this.rows, this.rowWeights, this.nodes])
       data.dispose();
     gl.deleteTexture(this.output);

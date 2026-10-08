@@ -1,4 +1,5 @@
 /** GLSL ES 3.00 sources for filling a volume, slicing it and crossfading it. */
+import type { VolumeFormat } from "./volume";
 
 /** One triangle covering the viewport, corners (-1, -1), (3, -1) and (-1, 3). */
 export const COVER = `#version 300 es
@@ -21,8 +22,8 @@ ivec4 voxel(int t, int y, int x) {
 }
 `;
 
-// Full-range BT.601: luma, Cb and Cr from colour, all in levels from 0 to 255, Cb and Cr
-// about 128.
+// Full-range BT.601: luma, Cb and Cr from colour and back, all in levels from 0 to 255, Cb
+// and Cr about 128.
 const YCC = `
 const float KR = 0.299, KB = 0.114, KG = 1.0 - KR - KB;
 const float CB = 2.0 * (1.0 - KB), CR = 2.0 * (1.0 - KR);
@@ -30,6 +31,12 @@ const float CB = 2.0 * (1.0 - KB), CR = 2.0 * (1.0 - KR);
 vec3 ycc(vec3 rgb) {
   float y = dot(rgb, vec3(KR, KG, KB));
   return vec3(y, vec2(rgb.b - y, rgb.r - y) / vec2(CB, CR) + 128.0);
+}
+
+// ycc's inverse.
+vec3 rgb(vec3 ycc) {
+  float y = ycc.x, b = y + CB * (ycc.y - 128.0), r = y + CR * (ycc.z - 128.0);
+  return vec3(r, (y - KR * r - KB * b) / KG, b);
 }
 `;
 
@@ -62,27 +69,57 @@ void main() {
   colour = vec4(clamp(floor(ycc(sum / 4.0).yz + 0.5), 0.0, 255.0) / 255.0, 0.0, 1.0);
 }`;
 
+// How a slicing shader reads each format: voxel(t, y, x) gives a voxel's four levels, and
+// shade(v) makes a pixel of them, or of a blend of them, v in units of 2^-12 of a level.
+const READ: Record<VolumeFormat, string> = {
+  // timeslice rounds a level v as min(255, int(v + 0.5)).
+  rgba: `${VOXEL}
+uvec4 shade(ivec4 v) {
+  return uvec4(clamp((v + 2048) >> 12, 0, 255));
+}
+`,
+  // Luma, Cb, Cr and 255, made colour only once blended.
+  yuv420: `${YCC}
+uniform highp sampler2DArray luma, chroma;  // chroma's texel (x, y) covers luma's (2x, 2y)
+
+ivec4 voxel(int t, int y, int x) {
+  vec2 c = texelFetch(chroma, ivec3(x >> 1, y >> 1, t), 0).rg;
+  return ivec4(round(vec4(texelFetch(luma, ivec3(x, y, t), 0).r, c, 1.0) * 255.0));
+}
+
+uvec4 shade(ivec4 v) {
+  return uvec4(uvec3(clamp(floor(rgb(vec3(v.xyz) / 4096.0) + 0.5), 0.0, 255.0)), 255u);
+}
+`,
+};
+
 const BLACK = "uvec4(0u, 0u, 0u, 255u)";
 
 // timeslice blends voxels a = (t0, x0), b = (t0, x1), c = (t1, x0) and d = (t1, x1) in
-// float64 as v = (a (1 - fx) + b fx) (1 - ft) + (c (1 - fx) + d fx) ft, and rounds it as
-// min(255, int(v + 0.5)). Here v = a + fx (b - a) + ft (c - a) + fx ft (a - b - c + d) is
-// summed exactly in integers, with fx, ft and fx ft truncated to whole numbers of 2^-36, in
-// three 12-bit parts, w[0] the most significant; the floored carries floor the whole sum. So
-// the level differs from timeslice's only where v is within about 1e-8 of halfway between
-// two. In floats the compiler may reorder the sums and round differently; in integers the
+// float64 as v = (a (1 - fx) + b fx) (1 - ft) + (c (1 - fx) + d fx) ft. Here v = a + fx (b - a)
+// + ft (c - a) + fx ft (a - b - c + d) is summed exactly in integers, to v in units of 2^-12,
+// with fx, ft and fx ft truncated to whole numbers of 2^-36, in three 12-bit parts, w[0] the
+// most significant; the floored carries floor the whole sum. So a level rounded from it
+// differs from timeslice's only where v is within about 1e-8 of halfway between two. In
+// floats the compiler may reorder the sums and round differently; in integers the
 // order makes no difference.
 const BLEND = `
-uvec4 blend(ivec4 a, ivec4 b, ivec4 c, ivec4 d, ivec3 w[3]) {
+ivec4 blend(ivec4 a, ivec4 b, ivec4 c, ivec4 d, ivec3 w[3]) {
   ivec4 e1 = b - a, e2 = c - a, e3 = a - b - c + d;
   ivec4 sum = ivec4(0);
   for (int i = 2; i >= 0; i--) sum = (sum >> 12) + w[i].x * e1 + w[i].y * e2 + w[i].z * e3;
-  return uvec4(clamp(a + ((sum + 2048) >> 12), 0, 255));  // sum is v - a in units of 2^-12
+  return (a << 12) + sum;  // sum is v - a in units of 2^-12
 }
 `;
 
+/** A slicing shader's source for a volume of each format, from its declarations and main. */
+const slicing = (body: string): Record<VolumeFormat, string> => ({
+  rgba: `${HEADER}${READ.rgba}${BLEND}${body}`,
+  yuv420: `${HEADER}${READ.yuv420}${BLEND}${body}`,
+});
+
 /** A flat slice: output column j reads the voxels and weights worked out for it. */
-export const FLAT = `${HEADER}${VOXEL}${BLEND}
+export const FLAT = slicing(`
 // Per column: voxels t0, t1, x0, x1 in row 0, t0 -1 outside the video, then a part of
 // each of the blend's weights in each of rows 1 to 3.
 uniform highp isampler2D columns;
@@ -95,20 +132,20 @@ void main() {
   if (at.x < 0) {
     colour = ${BLACK};
   } else if (nearest) {
-    colour = uvec4(voxel(at.x, row, at.z));
+    colour = shade(voxel(at.x, row, at.z) << 12);
   } else {
     ivec3 w[3];
     for (int i = 0; i < 3; i++) w[i] = texelFetch(columns, ivec2(j, i + 1), 0).xyz;
-    colour = blend(voxel(at.x, row, at.z), voxel(at.x, row, at.w),
-                   voxel(at.y, row, at.z), voxel(at.y, row, at.w), w);
+    colour = shade(blend(voxel(at.x, row, at.z), voxel(at.x, row, at.w),
+                         voxel(at.y, row, at.z), voxel(at.y, row, at.w), w));
   }
-}`;
+}`);
 
 /**
  * A slice pushed off its plane by noise: each pixel works out its own noise and where that
  * moves it, then reads the volume there, as timeslice._sample_noisy_columns does.
  */
-export const NOISY = `${HEADER}${VOXEL}${BLEND}
+export const NOISY = slicing(`
 uniform highp isampler2D columns;      // per column: t[j] and x[j] floored, first node column
 uniform highp sampler2D offsets;       // per column: t[j] and x[j] past those; row 1 node weights
 uniform highp isampler2D rows;         // per row: first node row
@@ -168,7 +205,7 @@ void main() {
   }
   ivec2 ts = neighbours(t, size.x, wrap), xs = neighbours(x, size.y, wrapX);
   if (nearest) {
-    colour = uvec4(voxel(ft >= 0.5 ? ts.y : ts.x, row, fx >= 0.5 ? xs.y : xs.x));
+    colour = shade(voxel(ft >= 0.5 ? ts.y : ts.x, row, fx >= 0.5 ? xs.y : xs.x) << 12);
     return;
   }
   vec3 rest = vec3(fx, ft, fx * ft);  // into blend's parts, fx ft already rounded to float32
@@ -178,9 +215,9 @@ void main() {
     w[i] = ivec3(floor(rest));
     rest -= floor(rest);
   }
-  colour = blend(voxel(ts.x, row, xs.x), voxel(ts.x, row, xs.y),
-                 voxel(ts.y, row, xs.x), voxel(ts.y, row, xs.y), w);
-}`;
+  colour = shade(blend(voxel(ts.x, row, xs.x), voxel(ts.x, row, xs.y),
+                       voxel(ts.y, row, xs.x), voxel(ts.y, row, xs.y), w));
+}`);
 
 // A frame of a fade, drawn into an RGBA32UI scratch as whole levels: texel (j, y) holds bytes
 // 16j to 16j + 15 of row y of a plane of `channels` bytes a texel, each uint's lowest byte

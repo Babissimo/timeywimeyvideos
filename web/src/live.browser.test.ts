@@ -337,7 +337,7 @@ describe("Live", () => {
     const gl = canvas.getContext("webgl2")!;
     const real = gl.getShaderParameter.bind(gl);
     vi.spyOn(gl, "getShaderParameter").mockImplementation((shader, name) =>
-      gl.getShaderSource(shader) === NOISY ? false : real(shader, name));
+      gl.getShaderSource(shader) === NOISY.rgba ? false : real(shader, name));
     const error = (() => { try { new Live(canvas); } catch (error) { return error; } })();
     expect(error).toBeInstanceOf(Problem);
     expect((error as Problem).message)
