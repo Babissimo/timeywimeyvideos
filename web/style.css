@@ -98,7 +98,7 @@ input:focus-visible, select:focus-visible, button:focus-visible {
 }
 
 .field { margin-top: 12px; }
-.field > label { display: block; margin-bottom: 4px; color: var(--muted); font-size: 12.5px; }
+.field > label, .field > .label { display: block; margin-bottom: 4px; color: var(--muted); font-size: 12.5px; }
 
 .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
 .pair .field:nth-child(-n + 2) { margin-top: 0; }
@@ -117,7 +117,8 @@ input[type="range"] { accent-color: var(--accent); }
 
 .segmented {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
   background: var(--raised);
   border: 1px solid var(--line);
   border-radius: 7px;

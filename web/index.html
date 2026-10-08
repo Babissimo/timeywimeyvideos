@@ -42,10 +42,35 @@
         </div>
       </div>
 
-      <label class="check">
-        <input type="checkbox" id="inside">
-        <span>Inside the video only<br><span class="note">Input's width, no black edges</span></span>
-      </label>
+      <div class="field">
+        <span class="label" id="edges-label">At the video's edges</span>
+        <div class="segmented" role="radiogroup" aria-labelledby="edges-label">
+          <label><input type="radio" name="edges" value="black" checked><span>Let black in</span></label>
+          <label><input type="radio" name="edges" value="inside"><span>Stay inside</span></label>
+          <label><input type="radio" name="edges" value="loop"><span>Wrap round</span></label>
+        </div>
+        <p class="note" id="edges-note"></p>
+      </div>
+
+      <div id="loop-fields" hidden>
+        <div class="field">
+          <label for="loop-fade">Crossfade the ends (s)</label>
+          <input type="number" id="loop-fade" min="0" step="0.1" value="0">
+          <p class="note">Hides the jump from the clip's end back to its start, unless
+            it already loops. Shortens the loop by as much.</p>
+        </div>
+        <label class="check">
+          <input type="checkbox" id="loop-sides">
+          <span>Wrap round the sides too<br><span class="note">The left edge follows the
+            right, so the frame can move sideways and noise can't push it out</span></span>
+        </label>
+        <div class="field" id="side-fade-field" hidden>
+          <label for="side-fade">Crossfade the sides (px)</label>
+          <input type="number" id="side-fade" min="0" step="1" value="0">
+          <p class="note">Hides the seam where the right edge meets the left, unless the
+            picture already wraps round. Narrows it by as much.</p>
+        </div>
+      </div>
 
       <div class="field" id="motion-field" hidden>
         <label for="motion">Motion</label>
@@ -157,6 +182,7 @@
       <div class="stage"><canvas id="cube"></canvas></div>
       <p class="note">Drag to turn, scroll to zoom. The first frame is at the front
         and time runs back; the shaded strip on top is the region the slice sweeps.</p>
+      <p class="note" id="cube-loop" hidden></p>
       <p class="note" id="cube-noise" hidden></p>
     </section>
 

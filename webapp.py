@@ -220,8 +220,8 @@ def plan(n_frames, width, opts, noise=None):
             raise Problem(f"{err} Use less noise, push it through time, or wrap "
                           "round the sides too.", kind="sideways")
         smaller = "a smaller angle or less noise" if noise else "a smaller angle"
-        raise Problem(f"{err} Use a longer clip or {smaller}, or untick "
-                      "Inside to sweep the whole plane with black edges.",
+        raise Problem(f"{err} Use a longer clip or {smaller}, or choose "
+                      "Let black in or Wrap round at the video's edges.",
                       kind="does_not_fit")
     except ValueError as err:
         raise Problem(str(err))

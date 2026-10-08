@@ -81,7 +81,8 @@ which are saved in `uploads/`.
   drawn where it cuts through, and the region the sweep covers shaded on top.
   Drag to turn it, scroll to zoom, or pick a view; **Top** is the x-t diagram
   below. With surface noise on it still draws the flat plane the points are
-  pushed off, not the bumps.
+  pushed off, not the bumps. On a loop, each part of the frame past an end
+  (or a side) of the box is drawn where it wraps round to.
 - **Render preview** and **Render full quality** run `timeslice.py` in a
   separate process with the options on the page. Renders are saved in
   `renders/` and can be watched and downloaded from the page.

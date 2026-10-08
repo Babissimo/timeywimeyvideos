@@ -73,7 +73,7 @@ def test_too_steep_for_inside_says_so():
     res, _, _ = frame(angle=80, inside=1)  # up to about 69 degrees fits
     assert res.status_code == 400
     assert res.get_json()["kind"] == "does_not_fit"
-    assert "untick Inside" in res.get_json()["error"]
+    assert "Let black in or Wrap round" in res.get_json()["error"]
 
 
 def test_live_loops_match_a_preview_render():

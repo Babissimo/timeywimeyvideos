@@ -17,30 +17,59 @@ const DESCRIBE = {
     "Steeper angles show more time and less of the scene.",
   shear: "Keeps every input column, each delayed by tan(angle) frames per pixel " +
     "across. Needs an angle between −90° and 90°.",
+  black: "The whole plane sweeps through the video, black wherever it's outside.",
+  inside: "Each frame is the input's width and stays inside the video, so no " +
+    "black, but steep angles may not fit the clip.",
+  loop: "Time runs round in a ring, so the video plays on repeat without a " +
+    "jump, and each frame is the input's width at any angle.",
   longest: "The longest straight line that fits; usually mostly through time.",
   perpendicular: "Like the whole-plane sweep. Every frame is a fresh slice, " +
     "but there's little room at small angles.",
+  "perpendicular-sides": "Every frame is a fresh slice. The loop goes across the " +
+    "width and round time a whole number of times, so it can be much longer than the clip.",
   time: "Forward through time, like ordinary playback but tilted.",
   "noise-time": "Each pixel is read up to that many frames earlier or later. " +
     "On a rotated frame near 90° this slides along the frame rather than off it.",
   "noise-perpendicular": "Each point moves straight off the plane. On a sheared " +
-    "frame that moves columns sideways too, so Inside only fits at 0°.",
+    "frame that moves columns sideways too, so Stay inside only fits at 0°.",
 };
 
 function sliceKind() {
   return document.querySelector('input[name="slice"]:checked').value;
 }
 
+// What the frame does at the video's edges: black, inside or loop.
+function edges() {
+  return document.querySelector('input[name="edges"]:checked').value;
+}
+
+function setEdges(value) {
+  document.querySelector(`input[name="edges"][value="${value}"]`).checked = true;
+  slicesChanged();
+}
+
+// Which ways the frame can move: rotate frames inside the video, or on a
+// loop round the sides.
+function moves() {
+  return sliceKind() === "rotate" &&
+    (edges() === "inside" || edges() === "loop" && $("loop-sides").checked);
+}
+
 function options() {
   const slice = sliceKind();
-  const inside = $("inside").checked;
+  const loop = edges() === "loop";
+  const sides = loop && $("loop-sides").checked;
   const noise = $("noise").checked;
   return {
     source: state.source,
     slice,
     angle: $("angle").value || "0",
-    inside: inside ? "1" : "",
-    motion: slice === "rotate" && inside ? $("motion").value : "",
+    inside: edges() === "inside" ? "1" : "",
+    motion: moves() ? $("motion").value : "",
+    loop: loop ? "1" : "",
+    loop_fade: loop ? $("loop-fade").value : "",
+    loop_sides: sides ? "1" : "",
+    loop_side_fade: sides ? $("side-fade").value : "",
     noise: noise ? $("noise-amount").value || "0" : "",
     noise_size: noise ? $("noise-size").value : "",
     noise_speed: noise ? $("noise-speed").value : "",
@@ -137,8 +166,11 @@ async function pump() {
     loadFace(opts);
   } catch (err) {
     pause();
-    showMessage(err.message, err.kind === "does_not_fit" &&
-      ["Sweep the whole plane instead", () => { $("inside").checked = false; slicesChanged(); }]);
+    showMessage(err.message,
+      err.kind === "does_not_fit" ?
+        ["Let black in instead", () => setEdges("black")] :
+      err.kind === "sideways" &&
+        ["Wrap round the sides too", () => { $("loop-sides").checked = true; slicesChanged(); }]);
   } finally {
     clearTimeout(slow);
     busy = false;
@@ -219,7 +251,8 @@ function step(by) {
   const info = state.info;
   if (!info || info.frames < 2) return;
   pause();
-  const f = Math.min(Math.max(info.frame + by, 0), info.frames - 1);
+  const f = info.loop ? (info.frame + by + info.frames) % info.frames :
+    Math.min(Math.max(info.frame + by, 0), info.frames - 1);
   state.pos = f / (info.frames - 1);
   refresh();
 }
@@ -260,10 +293,24 @@ function slicesChanged() {
   }
   const angle = Number($("angle").value) || 0;
   if (Math.abs(angle) > limit) setAngle(Math.sign(angle) * limit);
-  const motion = !shear && $("inside").checked;
-  $("motion-field").hidden = !motion;
+  const loop = edges() === "loop", sides = loop && $("loop-sides").checked;
+  $("edges-note").textContent = DESCRIBE[edges()];
+  $("loop-fields").hidden = !loop;
+  $("side-fade-field").hidden = !sides;
+  // No line round the sides is the longest.
+  $("motion").querySelector('[value="longest"]').disabled = sides;
+  if (sides && $("motion").value === "longest") $("motion").value = "perpendicular";
+  $("motion-field").hidden = !moves();
   $("slice-note").textContent = DESCRIBE[sliceKind()];
-  $("motion-note").textContent = DESCRIBE[$("motion").value];
+  const motion = $("motion").value;
+  $("motion-note").textContent = DESCRIBE[sides && motion === "perpendicular" ?
+    "perpendicular-sides" : motion];
+  $("cube-loop").hidden = !loop;
+  $("cube-loop").textContent = "Wrapping round, the clip's ends " +
+    (sides ? "and sides join up, so the frame wraps round both: pieces " +
+             "that leave the back or one side come in again at the front or the other." :
+             "join up, so the frame wraps round time: pieces that leave the back " +
+             "come in again at the front.");
   refresh();
 }
 
@@ -272,7 +319,8 @@ function setAngle(value) {
   $("angle-range").value = value;
 }
 
-for (const input of document.querySelectorAll('input[name="slice"], #inside, #motion')) {
+for (const input of document.querySelectorAll(
+  'input[name="slice"], input[name="edges"], #motion, #loop-sides')) {
   input.addEventListener("change", slicesChanged);
 }
 $("angle-range").addEventListener("input", () => {
@@ -284,7 +332,7 @@ $("angle").addEventListener("input", () => {
   $("angle-range").value = $("angle").value;
   refresh();
 });
-for (const id of ["start", "duration", "scale", "fps"]) {
+for (const id of ["start", "duration", "scale", "fps", "loop-fade", "side-fade"]) {
   $(id).addEventListener("change", refresh);
 }
 
@@ -433,7 +481,8 @@ let face = null;      // canvas holding the clip's first frame
 let faceKey = "";
 
 async function loadFace(opts) {
-  const key = [opts.source, opts.start, opts.duration, opts.scale].join("|");
+  const key = [opts.source, opts.start, opts.duration, opts.scale, opts.loop_fade,
+               opts.loop_side_fade].join("|");
   if (key === faceKey) return;
   faceKey = key;
   face = null;
@@ -507,10 +556,10 @@ function line(ctx, p, q, style, dash = [], width = 1) {
 }
 
 // The columns u (0 to width, in image coordinates) of the output frame that
-// lie inside the cuboid, or null if none do.
-function insideSpan(info, dx, dt) {
+// lie inside the cuboid once moved back by (shiftT, shiftX), or null if none do.
+function insideSpan(info, dx, dt, shiftT = 0, shiftX = 0) {
   const [T, , W] = info.volume;
-  const [t0, x0] = info.line;
+  const t0 = info.line[0] - shiftT, x0 = info.line[1] - shiftX;
   let a = 0, b = info.width;
   for (const [p, d, hi] of [[x0 - 0.5 * dx, dx, W - 0.5], [t0 - 0.5 * dt, dt, T - 0.5]]) {
     if (Math.abs(d) < 1e-9) {
@@ -567,21 +616,40 @@ function drawCube() {
   const [t0, x0, t1, x1] = info.line;
   const dx = info.width > 1 ? (x1 - x0) / (info.width - 1) : 1;
   const dt = info.width > 1 ? (t1 - t0) / (info.width - 1) : 0;
-  const onSlice = (u, v) => P(x0 + (u - 0.5) * dx, v - 0.5, t0 + (u - 0.5) * dt);
-  const span = insideSpan(info, dx, dt);
   const quad = (map, u0, u1, v1) => [map(u0, 0), map(u1, 0), map(u1, v1), map(u0, v1)];
 
-  const layers = [{
-    depth: onSlice(info.width / 2, info.height / 2)[2],
-    draw() {
-      polygon(ctx, quad(onSlice, 0, info.width, info.height),
-              { stroke: "rgba(242,163,58,.45)", dash: [4, 4] });
-      if (!span) return;
-      drawOnto(ctx, $("live"), onSlice, span[0], span[1], 1);
-      polygon(ctx, quad(onSlice, span[0], span[1], info.height),
-              { stroke: "#f2a33a", width: 1.5 });
-    },
-  }];
+  // A looping frame runs round time in a ring, and on a loop round the sides
+  // round x too, so each part of it past an end of the cuboid is drawn where
+  // it wraps round to: the frame moved back by whole clip lengths or widths.
+  const turns = (from, to, n, wraps) => {
+    if (!wraps) return [0];
+    const first = Math.floor((Math.min(from, to) + 0.5) / n);
+    const last = Math.floor((Math.max(from, to) + 0.5) / n);
+    return Array.from({ length: last - first + 1 }, (_, i) => (first + i) * n);
+  };
+  const layers = [];
+  for (const shiftT of turns(t0 - 0.5 * dt, t1 + 0.5 * dt, T, info.loop)) {
+    for (const shiftX of turns(x0 - 0.5 * dx, x1 + 0.5 * dx, W, info.sides)) {
+      const onSlice = (u, v) =>
+        P(x0 - shiftX + (u - 0.5) * dx, v - 0.5, t0 - shiftT + (u - 0.5) * dt);
+      const span = insideSpan(info, dx, dt, shiftT, shiftX);
+      if (info.loop && !span) continue;
+      const middle = span ? (span[0] + span[1]) / 2 : info.width / 2;
+      layers.push({
+        depth: onSlice(middle, info.height / 2)[2],
+        draw() {
+          if (!info.loop) {
+            polygon(ctx, quad(onSlice, 0, info.width, info.height),
+                    { stroke: "rgba(242,163,58,.45)", dash: [4, 4] });
+          }
+          if (!span) return;
+          drawOnto(ctx, $("live"), onSlice, span[0], span[1], 1);
+          polygon(ctx, quad(onSlice, span[0], span[1], info.height),
+                  { stroke: "#f2a33a", width: 1.5 });
+        },
+      });
+    }
+  }
   if (face) {
     const onFace = (u, v) => P(u - 0.5, v - 0.5, -0.5);
     layers.push({
@@ -598,10 +666,26 @@ function drawCube() {
   if (info.frames > 1) {
     const top = ([t, x]) => P(x, -0.5, t);
     const [f0, f1, f2, f3] = info.first, [l0, l1, l2, l3] = info.last;
-    polygon(ctx, [top([f0, f1]), top([f2, f3]), top([l2, l3]), top([l0, l1])],
-            { fill: "rgba(242,163,58,.10)", stroke: "rgba(242,163,58,.35)" });
-    const from = top([(f0 + f2) / 2, (f1 + f3) / 2]);
-    const to = top([(l0 + l2) / 2, (l1 + l3) / 2]);
+    let from = top([(f0 + f2) / 2, (f1 + f3) / 2]);
+    let to = top([(l0 + l2) / 2, (l1 + l3) / 2]);
+    if (info.loop) {
+      // A loop goes all the way round time, between the frame's ends in x,
+      // or over all of x if it moves sideways round the sides too. Its
+      // centre's path wraps round, so only its heading is drawn, across the
+      // middle.
+      const ht = (l0 + l2) / 2 - (f0 + f2) / 2, hx = (l1 + l3) / 2 - (f1 + f3) / 2;
+      const [left, right] = Math.abs(hx) > 1e-9 ? [-0.5, W - 0.5] :
+        [Math.min(f1, f3), Math.max(f1, f3)];
+      polygon(ctx, [top([-0.5, left]), top([-0.5, right]), top([T - 0.5, right]),
+                    top([T - 0.5, left])],
+              { fill: "rgba(242,163,58,.10)", stroke: "rgba(242,163,58,.35)" });
+      const reach = 0.4 * Math.min(T, W) / (Math.hypot(ht, hx) || 1);
+      from = top([(T - 1) / 2 - ht * reach, (W - 1) / 2 - hx * reach]);
+      to = top([(T - 1) / 2 + ht * reach, (W - 1) / 2 + hx * reach]);
+    } else {
+      polygon(ctx, [top([f0, f1]), top([f2, f3]), top([l2, l3]), top([l0, l1])],
+              { fill: "rgba(242,163,58,.10)", stroke: "rgba(242,163,58,.35)" });
+    }
     line(ctx, from, to, "rgba(242,163,58,.8)", [5, 4], 1.5);
     const angle = Math.atan2(to[1] - from[1], to[0] - from[0]);
     if (Math.hypot(to[0] - from[0], to[1] - from[1]) > 12) {
