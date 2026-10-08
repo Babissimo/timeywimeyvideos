@@ -1,4 +1,8 @@
-/** Small WebGL2 helpers: programs, data textures and framebuffers. */
+/**
+ * Small WebGL2 helpers: programs, data textures and framebuffers. dataTexture, fill and
+ * DataTexture.put bind to whichever texture unit is active, and program leaves its program
+ * in use, so make a draw's textures and programs first, then bind every unit it samples.
+ */
 
 /** A linked program and its uniforms' locations. */
 export interface Program {

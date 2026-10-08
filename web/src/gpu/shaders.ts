@@ -1,4 +1,4 @@
-/** GLSL ES 3.00 sources for slicing a volume and crossfading it. */
+/** GLSL ES 3.00 sources for filling a volume, slicing it and crossfading it. */
 
 /** One triangle covering the viewport, corners (-1, -1), (3, -1) and (-1, 3). */
 export const COVER = `#version 300 es
@@ -20,6 +20,47 @@ ivec4 voxel(int t, int y, int x) {
   return ivec4(round(texelFetch(volume, ivec3(x, y, t), 0) * 255.0));
 }
 `;
+
+// Full-range BT.601: luma, Cb and Cr from colour, all in levels from 0 to 255, Cb and Cr
+// about 128.
+const YCC = `
+const float KR = 0.299, KB = 0.114, KG = 1.0 - KR - KB;
+const float CB = 2.0 * (1.0 - KB), CR = 2.0 * (1.0 - KR);
+
+vec3 ycc(vec3 rgb) {
+  float y = dot(rgb, vec3(KR, KG, KB));
+  return vec3(y, vec2(rgb.b - y, rgb.r - y) / vec2(CB, CR) + 128.0);
+}
+`;
+
+// A frame to convert, in an RGBA8 texture, row 0 its top.
+const FRAME = `
+uniform highp sampler2D frame;
+out vec4 colour;
+
+vec3 pixel(ivec2 p) {
+  return round(texelFetch(frame, p, 0).rgb * 255.0);
+}
+`;
+
+/** A frame's luma, into an R8 layer the frame's size. */
+export const LUMA = `${HEADER}${YCC}${FRAME}
+void main() {
+  colour = vec4(floor(ycc(pixel(ivec2(gl_FragCoord.xy))).x + 0.5) / 255.0);
+}`;
+
+/**
+ * A frame's chroma, into an RG8 layer half its size each way, rounded up: for each 2×2 block
+ * of pixels, Cb and Cr of their mean colour. A block cut short by an odd size repeats the
+ * pixels it has.
+ */
+export const CHROMA = `${HEADER}${YCC}${FRAME}
+void main() {
+  ivec2 p = 2 * ivec2(gl_FragCoord.xy), last = textureSize(frame, 0) - 1;
+  vec3 sum = vec3(0.0);
+  for (int k = 0; k < 4; k++) sum += pixel(min(p + ivec2(k & 1, k >> 1), last));
+  colour = vec4(clamp(floor(ycc(sum / 4.0).yz + 0.5), 0.0, 255.0) / 255.0, 0.0, 1.0);
+}`;
 
 const BLACK = "uvec4(0u, 0u, 0u, 255u)";
 
@@ -141,19 +182,40 @@ void main() {
                  voxel(ts.y, row, xs.x), voxel(ts.y, row, xs.y), w);
 }`;
 
+// A frame of a fade, drawn into an RGBA32UI scratch as whole levels: texel (j, y) holds bytes
+// 16j to 16j + 15 of row y of a plane of `channels` bytes a texel, each uint's lowest byte
+// first, and 0 past `width` texels. The shader gives faded(y, x), texel x of row y faded.
+const PACK = `
+uniform int width;     // the plane's texels faded in each row
+uniform int channels;  // its bytes a texel: 4, 2 or 1
+out uvec4 colour;
+
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  int per = 4 / channels;  // texels to a uint
+  uvec4 words = uvec4(0u);
+  for (int k = 0; k < 4; k++) {
+    for (int i = 0; i < per; i++) {
+      int x = (4 * p.x + k) * per + i;
+      if (x >= width) break;
+      uvec4 level = faded(p.y, x);
+      for (int c = 0; c < channels; c++) words[k] |= level[c] << (8 * (i * channels + c));
+    }
+  }
+  colour = words;
+}
+`;
+
 /**
  * One frame of a crossfade, as timeslice.crossfade works it out in float32: slice i of the
  * fade, at w of itself and 1 - w of slice i + past, rounded by adding 0.5 and truncating.
- * Each texel drawn holds four voxels of a row, each as a uint whose bytes are its levels.
  */
 export const CROSSFADE = `${HEADER}${VOXEL}
 uniform highp sampler2D weights;  // for slice i: w and 1 - w
 uniform int layer;                // the frame drawn
 uniform ivec2 past;               // (t, x) from slice i to the slice it takes over from
 uniform bool across;              // slice i is the frame's column i, not the frame
-uniform int width;                // the columns faded in each row
 uniform int zero;                 // always 0, which the compiler can't know
-out uvec4 colour;                 // at texel (j, y), voxels 4j to 4j + 3 of row y
 
 // x as it is, though the compiler can't tell, so it rounds each product on its own as numpy
 // does, where it might otherwise fuse one into a multiply-add.
@@ -161,21 +223,35 @@ vec4 rounded(vec4 x) {
   return intBitsToFloat(floatBitsToInt(x) ^ zero);
 }
 
-// Voxel (layer, y, x) faded, its levels as a uint's bytes, R the lowest; 0 past the width.
-uint faded(int y, int x) {
-  if (x >= width) return 0u;
+uvec4 faded(int y, int x) {
   vec2 w = texelFetch(weights, ivec2(across ? x : layer, 0), 0).xy;
   vec4 mixed = rounded(vec4(voxel(layer + past.x, y, x + past.y)) * w.y);
   mixed = rounded(mixed + rounded(vec4(voxel(layer, y, x)) * w.x));
-  uvec4 level = min(uvec4(floor(mixed + 0.5)), 255u);
-  return level.r | level.g << 8 | level.b << 16 | level.a << 24;
+  return min(uvec4(floor(mixed + 0.5)), 255u);
 }
+${PACK}`;
 
-void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy);
-  int x = 4 * p.x;
-  colour = uvec4(faded(p.y, x), faded(p.y, x + 1), faded(p.y, x + 2), faded(p.y, x + 3));
-}`;
+/**
+ * One frame of a crossfade of columns in a chroma plane, each of whose columns covers two of
+ * the picture's: the mean, over those of them the faded picture keeps, of the chroma each
+ * takes, which for the first n is blended as CROSSFADE blends them, and past those is kept.
+ */
+export const CHROMA_CROSSFADE = `${HEADER}${VOXEL}
+uniform highp sampler2D weights;  // for the picture's column i: w and 1 - w
+uniform int layer;                // the frame drawn
+uniform int n, kept;              // the picture's columns faded, and those it keeps
+
+uvec4 faded(int y, int j) {
+  vec4 own = vec4(voxel(layer, y, j)), sum = vec4(0.0);
+  float count = 0.0;
+  for (int x = 2 * j; x < min(2 * j + 2, kept); x++) {
+    vec2 w = texelFetch(weights, ivec2(min(x, n - 1), 0), 0).xy;
+    sum += x < n ? own * w.x + vec4(voxel(layer, y, (x + kept) >> 1)) * w.y : own;
+    count += 1.0;
+  }
+  return min(uvec4(floor(sum / count + 0.5)), 255u);
+}
+${PACK}`;
 
 /** The slice scaled to the canvas, nearest pixel, its first row at the top. */
 export const SHOW = `${HEADER}

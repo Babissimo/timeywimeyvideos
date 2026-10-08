@@ -195,7 +195,7 @@ export class Slicer {
       gl.useProgram(this.flat.program);
       gl.uniform1i(this.flat.uniforms.nearest, Number(nearest));
     }
-    bind(gl, 0, volume.texture, gl.TEXTURE_2D_ARRAY);
+    bind(gl, 0, volume.planes[0].texture, gl.TEXTURE_2D_ARRAY);
     bind(gl, 1, this.columns.texture);
     this.cover(this.framebuffer, width, height);
   }

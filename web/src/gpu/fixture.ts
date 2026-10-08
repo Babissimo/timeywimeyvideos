@@ -4,7 +4,7 @@
  */
 import raw from "../../test/fixtures/sampler.json?raw";
 import type { Columns, NoiseGrid } from "../types";
-import { Volume } from "./volume";
+import { Volume, type VolumeFormat } from "./volume";
 
 /** A clip as numpy holds it: (t, y, x) voxels of 3 channels. */
 export interface Clip { frames: number; height: number; width: number; rgb: Uint8Array }
@@ -107,23 +107,46 @@ export function rgba(clip: Clip, t: number): Uint8Array {
   return out;
 }
 
+/** A clip whose every 2×2 block of pixels, from the top left, is one random colour. */
+export function blockClip(frames: number, height: number, width: number): Clip {
+  let seed = frames * 7919 + height * 104729 + width;
+  const random = () => (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 24;
+  const [rows, columns] = [Math.ceil(height / 2), Math.ceil(width / 2)];
+  const blocks = Array.from({ length: frames * rows * columns * 3 }, random);
+  const rgb = new Uint8Array(frames * height * width * 3);
+  let i = 0;
+  for (let t = 0; t < frames; t++)
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++)
+        for (let c = 0; c < 3; c++)
+          rgb[i++] = blocks[((t * rows + (y >> 1)) * columns + (x >> 1)) * 3 + c];
+  return { frames, height, width, rgb };
+}
+
 /** A volume holding the clip. */
-export function upload(gl: WebGL2RenderingContext, clip: Clip): Volume {
-  const volume = Volume.create(gl, clip.frames, clip.height, clip.width);
+export function upload(gl: WebGL2RenderingContext, clip: Clip,
+                       format: VolumeFormat = "rgba"): Volume {
+  const volume = Volume.create(gl, clip.frames, clip.height, clip.width, { format });
   for (let t = 0; t < clip.frames; t++) volume.upload(t, rgba(clip, t));
   return volume;
 }
 
-/** Frame t of a volume, as many columns as it has now, as RGBA rows top-first. */
-export function readFrame(gl: WebGL2RenderingContext, volume: Volume, t: number): Uint8Array {
+/** Layer t of a texture array, width × height texels of it, as RGBA rows top-first. */
+export function readLayer(gl: WebGL2RenderingContext, texture: WebGLTexture, t: number,
+                          width: number, height: number): Uint8Array {
   const framebuffer = gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
-  gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, volume.texture, 0, t);
-  const out = new Uint8Array(volume.width * volume.height * 4);
-  gl.readPixels(0, 0, volume.width, volume.height, gl.RGBA, gl.UNSIGNED_BYTE, out);
+  gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, texture, 0, t);
+  const out = new Uint8Array(width * height * 4);
+  gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, out);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.deleteFramebuffer(framebuffer);
   return out;
+}
+
+/** Frame t of an RGBA volume, as many columns as it has now, as RGBA rows top-first. */
+export function readFrame(gl: WebGL2RenderingContext, volume: Volume, t: number): Uint8Array {
+  return readLayer(gl, volume.planes[0].texture, t, volume.width, volume.height);
 }
 
 const percent = (part: number, whole: number) => `${+(100 * part / whole).toFixed(3)}%`;

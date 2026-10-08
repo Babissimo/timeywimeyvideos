@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, onTestFinished, test, vi } from "vitest";
-import { clips, crossfadeCases, readFrame, rgba, Tally, upload } from "./fixture";
+import { blockClip, type Clip, clips, crossfadeCases, readFrame, readLayer, rgba, Tally,
+         upload } from "./fixture";
 import { Volume, VolumeTooLarge } from "./volume";
 
 const gl = document.createElement("canvas").getContext("webgl2")!;
@@ -132,13 +133,17 @@ describe("crossfade matches timeslice.crossfade", () => {
     // Chrome here has uploaded from a pixel buffer before a read into it landed. That shows
     // only on the first fade of a session ("tall columns" above, run on its own), so this
     // holds the fade to the route that can't race.
-    const volume = upload(gl, clips.small);
-    const bindBuffer = vi.spyOn(gl, "bindBuffer");
-    volume.crossfade(3, 2);
     const pixelBuffers: GLenum[] = [gl.PIXEL_PACK_BUFFER, gl.PIXEL_UNPACK_BUFFER];
-    expect(bindBuffer.mock.calls.filter(([target]) => pixelBuffers.includes(target))).toEqual([]);
-    bindBuffer.mockRestore();
-    volume.dispose();
+    for (const format of ["rgba", "yuv420"] as const) {
+      const volume = upload(gl, clips.small, format);
+      const bindBuffer = vi.spyOn(gl, "bindBuffer");
+      volume.crossfade(2, 0);
+      volume.crossfade(3, 2);
+      expect(bindBuffer.mock.calls.filter(([target]) => pixelBuffers.includes(target)), format)
+        .toEqual([]);
+      bindBuffer.mockRestore();
+      volume.dispose();
+    }
   });
 
   test("leaves no GL error, and uploads working as before", () => {
@@ -166,4 +171,206 @@ describe("crossfade matches timeslice.crossfade", () => {
     for (let t = 0; t < 13; t++) expect(readFrame(gl, volume, t)).toEqual(rgba(clips.long, t));
     volume.dispose();
   });
+});
+
+const YUV = { format: "yuv420" } as const;
+const half = (n: number) => Math.ceil(n / 2);
+const level = (v: number) => Math.min(255, Math.max(0, Math.floor(v + 0.5)));
+const yuvBytes = (frames: number, height: number, width: number) =>
+  frames * (height * width + 2 * half(height) * half(width));
+
+/** A frame's planes: luma, then chroma as Cb and Cr in turn, rows top-first. */
+interface Planes { luma: Uint8Array; chroma: Uint8Array }
+
+/**
+ * Frame t of a clip in YUV 4:2:0, worked out in float64: full-range BT.601 luma, and the
+ * chroma of each 2×2 block's mean colour, over the pixels the block has at an odd edge.
+ */
+function yuv420(clip: Clip, t: number): Planes {
+  const { height, width } = clip;
+  const at = (y: number, x: number, c: number) =>
+    clip.rgb[((t * height + y) * width + x) * 3 + c];
+  const luma = new Uint8Array(height * width);
+  for (let y = 0; y < height; y++)
+    for (let x = 0; x < width; x++)
+      luma[y * width + x] = level(0.299 * at(y, x, 0) + 0.587 * at(y, x, 1)
+                                  + 0.114 * at(y, x, 2));
+  const chroma = new Uint8Array(half(height) * half(width) * 2);
+  for (let i = 0; i < half(height); i++)
+    for (let j = 0; j < half(width); j++) {
+      const ys = [...new Set([2 * i, Math.min(2 * i + 1, height - 1)])];
+      const xs = [...new Set([2 * j, Math.min(2 * j + 1, width - 1)])];
+      const mean = [0, 1, 2].map((c) => ys.flatMap((y) => xs.map((x) => at(y, x, c)))
+        .reduce((a, b) => a + b) / (ys.length * xs.length));
+      const y = 0.299 * mean[0] + 0.587 * mean[1] + 0.114 * mean[2];
+      chroma.set([level((mean[2] - y) / 1.772 + 128), level((mean[0] - y) / 1.402 + 128)],
+                 2 * (i * half(width) + j));
+    }
+  return { luma, chroma };
+}
+
+/** Frame t of a YUV 4:2:0 volume's planes, all the columns it stores. */
+function readPlanes(volume: Volume, t: number): Planes {
+  const [luma, chroma] = volume.planes;
+  const y = readLayer(gl, luma.texture, t, luma.width, luma.height);
+  const c = readLayer(gl, chroma.texture, t, chroma.width, chroma.height);
+  return {
+    luma: y.filter((_, i) => i % 4 === 0),
+    chroma: c.filter((_, i) => i % 4 < 2),
+  };
+}
+
+/** How far apart two planes are, at most, and the share of levels the same. */
+function compare(got: Uint8Array, expected: Uint8Array): { maxDiff: number; same: number } {
+  expect(got.length).toBe(expected.length);
+  let maxDiff = 0, same = 0;
+  got.forEach((v, i) => {
+    maxDiff = Math.max(maxDiff, Math.abs(v - expected[i]));
+    if (v === expected[i]) same++;
+  });
+  return { maxDiff, same: same / got.length };
+}
+
+describe("Volume in YUV 4:2:0", () => {
+  test("takes 1.5 bytes a voxel, rounding chroma up where a size is odd", () => {
+    for (const [frames, height, width] of [[3, 4, 6], [2, 5, 7], [1, 1, 1]]) {
+      const volume = Volume.create(gl, frames, height, width, YUV);
+      expect(volume.format).toBe("yuv420");
+      expect([volume.frames, volume.height, volume.width]).toEqual([frames, height, width]);
+      expect(volume.planes.map(({ width, height }) => [width, height]))
+        .toEqual([[width, height], [half(width), half(height)]]);
+      expect(volume.bytes).toBe(yuvBytes(frames, height, width));
+      volume.dispose();
+    }
+    const volume = Volume.create(gl, 3, 4, 6, YUV);
+    expect(volume.bytes / (3 * 4 * 6)).toBe(1.5);
+    volume.dispose();
+    const plain = Volume.create(gl, 1, 1, 1);
+    expect(plain.format).toBe("rgba");
+    plain.dispose();
+    expect(gl.getError()).toBe(gl.NO_ERROR);
+  });
+
+  test("holds full-range BT.601 luma, and chroma averaged over 2×2 blocks", () => {
+    for (const clip of [clips.small, clips.long, clips.big]) {  // odd sizes, and even
+      const volume = upload(gl, clip, "yuv420");
+      for (let t = 0; t < Math.min(clip.frames, 20); t++) {
+        const got = readPlanes(volume, t), expected = yuv420(clip, t);
+        // The GPU works in float32, so a level that is a half in float64 may round either way.
+        for (const plane of ["luma", "chroma"] as const) {
+          const { maxDiff, same } = compare(got[plane], expected[plane]);
+          expect(maxDiff, `${plane} of frame ${t}`).toBeLessThanOrEqual(1);
+          expect(same, `${plane} of frame ${t}`).toBeGreaterThanOrEqual(0.98);
+        }
+      }
+      volume.dispose();
+    }
+    expect(gl.getError()).toBe(gl.NO_ERROR);
+  });
+
+  test("takes pixels as they are, whatever the unpack state", async () => {
+    const clip = clips.small;
+    const pixels = rgba(clip, 3);  // random, so a flip would show
+    for (let p = 0; p < pixels.length / 4; p += 3) pixels[4 * p + 3] = 96;  // premultiplying
+    const image = new ImageData(new Uint8ClampedArray(pixels), clip.width, clip.height);
+    const bitmap = await createImageBitmap(image, { premultiplyAlpha: "none" });
+    const volume = Volume.create(gl, 3, clip.height, clip.width, YUV);
+    for (let round = 0; round < 2; round++) {  // so that no upload comes first
+      [pixels, image, bitmap].forEach((source, t) => {
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+        volume.upload(t, source);
+      });
+    }
+    bitmap.close();
+    const expected = yuv420(clip, 3);
+    for (let t = 0; t < 3; t++) {
+      const got = readPlanes(volume, t);
+      for (const plane of ["luma", "chroma"] as const)
+        expect(compare(got[plane], expected[plane]).maxDiff, `${plane} of frame ${t}`)
+          .toBeLessThanOrEqual(1);
+    }
+    volume.dispose();
+  });
+
+  test("refuses more frames or pixels than the GPU's limits", () => {
+    const layers = gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS) as number;
+    const size = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
+    for (const [frames, height, width] of [[layers + 1, 2, 2], [2, size + 1, 2], [2, 2, size + 1]])
+      expect(() => Volume.create(gl, frames, height, width, YUV)).toThrow(RangeError);
+  });
+
+  test("is too large when the GPU can't allocate it", () => {
+    // A context of its own, since a driver may lose it rather than refuse the allocation.
+    const own = document.createElement("canvas").getContext("webgl2")!;
+    onTestFinished(() => own.getExtension("WEBGL_lose_context")?.loseContext());
+    const layers = own.getParameter(own.MAX_ARRAY_TEXTURE_LAYERS) as number;
+    const size = own.getParameter(own.MAX_TEXTURE_SIZE) as number;
+    const error = thrown(() => Volume.create(own, layers, size, size, YUV));
+    expect(error).toBeInstanceOf(VolumeTooLarge);
+    expect((error as VolumeTooLarge).bytes).toBe(yuvBytes(layers, size, size));
+    expect(own.isContextLost()).toBe(false);
+    expect(own.getError()).toBe(own.NO_ERROR);
+  });
+});
+
+/**
+ * What a crossfade makes of a YUV 4:2:0 volume's planes, worked out in float64: luma as an
+ * RGBA volume's channels, and each chroma column the mean, over the picture's columns it
+ * covers, of the chroma each takes, blended where that column is faded and kept where not.
+ */
+function fadePlanes(before: Planes[], width: number, n: number, axis: 0 | 2): Planes[] {
+  const length = (axis === 0 ? before.length : width) - n;
+  const w = (i: number) => Math.fround((i + 1) / (n + 1));
+  const mix = (a: number, b: number, i: number) => a * w(i) + b * Math.fround(1 - w(i));
+  const cw = half(width);
+  if (axis === 0) {
+    return before.slice(0, length).map((planes, t) => t >= n ? planes : {
+      luma: planes.luma.map((v, i) => level(mix(v, before[t + length].luma[i], t))),
+      chroma: planes.chroma.map((v, i) => level(mix(v, before[t + length].chroma[i], t))),
+    });
+  }
+  return before.map(({ luma, chroma }) => ({
+    luma: luma.map((v, i) => i % width < n ? level(mix(v, luma[i + length], i % width)) : v),
+    chroma: chroma.map((v, i) => {
+      const j = (i >> 1) % cw, row = Math.floor((i >> 1) / cw), k = i & 1;
+      if (2 * j >= n) return v;
+      const xs = [2 * j, 2 * j + 1].filter((x) => x < length);
+      const sum = xs.reduce((s, x) =>
+        s + (x < n ? mix(v, chroma[2 * (row * cw + ((x + length) >> 1)) + k], x) : v), 0);
+      return level(sum / xs.length);
+    }),
+  }));
+}
+
+describe("crossfade in YUV 4:2:0 fades luma and chroma alike", () => {
+  const cases: [string, Clip, number, 0 | 2][] = [
+    ...crossfadeCases.map(({ name, clip, n, axis }) =>
+      [name, clip, n, axis] as [string, Clip, number, 0 | 2]),
+    ["small, 3 of 11 columns", clips.small, 3, 2],  // an odd fade, an even remainder
+    ["small, 4 of 11 columns", clips.small, 4, 2],  // an even fade, an odd remainder
+    ["long, 1 of 5 columns", clips.long, 1, 2],
+    ["big, 11 of 300 columns", clips.big, 11, 2],   // an odd fade, an odd remainder
+    ["3 of 6 columns", blockClip(3, 3, 6), 3, 2],   // the last chroma column half kept
+  ];
+  for (const [name, clip, n, axis] of cases) {
+    test(name, () => {
+      const volume = upload(gl, clip, "yuv420");
+      const before = Array.from({ length: clip.frames }, (_, t) => readPlanes(volume, t));
+      volume.crossfade(n, axis);
+      const frames = axis === 0 ? clip.frames - n : clip.frames;
+      const width = axis === 2 ? clip.width - n : clip.width;
+      expect([volume.frames, volume.height, volume.width]).toEqual([frames, clip.height, width]);
+      expect(volume.bytes).toBe(yuvBytes(clip.frames, clip.height, clip.width));
+      const expected = fadePlanes(before, clip.width, n, axis);
+      for (let t = 0; t < frames; t++) {
+        const got = readPlanes(volume, t);
+        for (const plane of ["luma", "chroma"] as const)
+          expect(compare(got[plane], expected[t][plane]).maxDiff, `${plane} of frame ${t}`)
+            .toBeLessThanOrEqual(1);
+      }
+      volume.dispose();
+      expect(gl.getError()).toBe(gl.NO_ERROR);
+    });
+  }
 });
