@@ -4,12 +4,14 @@ import {
   DoesNotFit, OptionError, planSweep, rotation, rotationSweep, shearSweep, windings,
   type Motion, type PlanOptions, type Sweep,
 } from "./planner";
+import { Noise, type NoiseDirection } from "./noise";
 import { floorMod } from "./pymath";
 
 interface Case {
   nFrames: number;
   width: number;
-  options: Omit<PlanOptions, "noise">;
+  options: Omit<PlanOptions, "noise">
+    & { noise?: { amplitude: number; direction?: NoiseDirection } };
   error?: { type: string; message: string };
   sweep?: {
     width: number; frames: number; normal: [number, number]; loop: boolean; sides: boolean;
@@ -25,9 +27,10 @@ function close(got: number, expected: number): boolean {
 
 /** How a case differs from what Python gave, or null if it doesn't. */
 function mismatch({ nFrames, width, options, error, sweep }: Case): string | null {
+  const noise = options.noise && new Noise(options.noise.amplitude, options.noise);
   let got: Sweep;
   try {
-    got = planSweep(nFrames, width, options);
+    got = planSweep(nFrames, width, { ...options, noise });
   } catch (err) {
     if (!(err instanceof OptionError)) throw err;
     if (!error) return `raised ${err.name}: ${err.message}`;
@@ -61,6 +64,7 @@ test("plans every sweep in the fixture as Python does", () => {
   expect(failures).toEqual([]);
   expect(py.sweeps.filter((c) => c.sweep).length).toBeGreaterThan(400);
   expect(py.sweeps.filter((c) => c.error?.type === "DoesNotFit").length).toBeGreaterThan(100);
+  expect(py.sweeps.filter((c) => c.sweep && c.options.noise).length).toBeGreaterThan(200);
 });
 
 // Geometry, after test_timeslice.py. The cuboid is T frames of W columns.
@@ -268,5 +272,64 @@ describe("loops", () => {
     expect(() => shearSweep(T, W, 30, { inside: true, sides: true })).toThrow(OptionError);
     expect(() => rotationSweep(T, W, 30, { motion: "longest", loop: true, sides: true }))
       .toThrow(OptionError);
+  });
+});
+
+describe("noise", () => {
+  test("makes room inside", () => {
+    const noise = new Noise(2);
+    expect(rotationSweep(13, 5, 30, { inside: true, motion: "time", noise }).frames)
+      .toBe(rotationSweep(13, 5, 30, { inside: true, motion: "time" }).frames - 4);
+    expect(shearSweep(13, 5, 20, { inside: true, noise }).frames)
+      .toBe(shearSweep(13, 5, 20, { inside: true }).frames - 4);
+    expect(rotationSweep(13, 5, 0, { inside: true, noise }).frames).toBe(13 - 4);
+  });
+
+  test("starts a whole-plane sweep early enough for the bumps", () => {
+    expect(rotationSweep(T, W, 30, { noise: new Noise(2, { direction: "perpendicular" }) }).frames)
+      .toBe(rotationSweep(T, W, 30).frames + 4);
+    expect(shearSweep(T, W, 30, { noise: new Noise(2) }).frames)
+      .toBe(shearSweep(T, W, 30).frames + 4);
+  });
+
+  test("perpendicular noise pushes straight off the plane", () => {
+    const noise = new Noise(1.5, { direction: "perpendicular" });
+    const sweeps = [0, 30, 90, 135].map((angle) => rotationSweep(T, W, angle, { noise }));
+    sweeps.push(shearSweep(T, W, 30, { noise }));
+    for (const sweep of sweeps) {
+      const { t, x } = sweep.at(2);
+      const [pushT, pushX] = noise.push(sweep.normal);
+      expect(Math.abs(pushT * (t[1] - t[0]) + pushX * (x[1] - x[0]))).toBeLessThan(1e-9);
+      expect(Math.hypot(pushT, pushX)).toBeCloseTo(1.5, 9);
+    }
+  });
+
+  test("an inside frame pushed out of the video says which angles fit", () => {
+    // Perpendicular noise pushes the ends of a nearly flat frame sideways, out of the video,
+    // until the frame turns far enough to leave room.
+    const sideways = new Noise(1, { direction: "perpendicular" });
+    expect(() => rotationSweep(13, 5, 20, { inside: true, noise: sideways }))
+      .toThrow(/sideways.*Angles of 0 and 53\.2 to 90 degrees fit this clip\.$/);
+    expect(() => rotationSweep(13, 5, 0, { inside: true, noise: new Noise(7) }))
+      .toThrow(/No angle fits this clip\.$/);
+  });
+
+  test("a sheared inside frame only takes perpendicular noise at 0 degrees", () => {
+    const sideways = new Noise(1, { direction: "perpendicular" });
+    expect(() => shearSweep(13, 5, 20, { inside: true, noise: sideways }))
+      .toThrow("Push the noise through time");
+    expect(shearSweep(13, 5, 0, { inside: true, noise: sideways }).frames).toBe(11);
+  });
+
+  test("a loop only takes perpendicular noise that keeps inside, unless the sides wrap", () => {
+    const sideways = new Noise(1, { direction: "perpendicular" });
+    expect(() => rotationSweep(13, 5, 20, { noise: sideways, loop: true }))
+      .toThrow(/Angles of 0 and 53\.2 to 90 degrees fit this clip\.$/);
+    expect(rotationSweep(13, 5, 60, { noise: sideways, loop: true }).frames).toBe(13);
+    expect(() => shearSweep(13, 5, 20, { noise: sideways, loop: true })).toThrow(DoesNotFit);
+    expect(rotationSweep(13, 5, 20, { noise: sideways, loop: true, sides: true }).frames).toBe(13);
+    expect(shearSweep(13, 5, 20, { noise: sideways, loop: true, sides: true }).frames).toBe(13);
+    // Noise through time never leaves a ring.
+    expect(shearSweep(3, 5, 80, { noise: new Noise(9), loop: true }).frames).toBe(3);
   });
 });
