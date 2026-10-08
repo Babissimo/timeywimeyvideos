@@ -193,18 +193,35 @@ def _sample_points(volume, t, y, x, out):
 @njit(parallel=True, cache=True)
 def _sample_columns(volume, t, x, nearest, out):
     n_t, n_y, n_x, n_c = volume.shape
+    n = t.shape[0]
+    # Every row of output column j reads the same source columns with the same
+    # weights, so work those out once per column rather than once per pixel.
+    inside = np.empty(n, np.bool_)
+    t0s, t1s = np.empty(n, np.int64), np.empty(n, np.int64)
+    x0s, x1s = np.empty(n, np.int64), np.empty(n, np.int64)
+    fts, fxs = np.empty(n), np.empty(n)
+    for j in range(n):
+        inside[j] = -0.5 <= t[j] < n_t - 0.5 and -0.5 <= x[j] < n_x - 0.5
+        if inside[j]:
+            t0s[j], t1s[j], fts[j] = _neighbours(t[j], n_t)
+            x0s[j], x1s[j], fxs[j] = _neighbours(x[j], n_x)
+            if nearest:  # keep only the closest voxel, in t0s and x0s
+                if fts[j] >= 0.5:
+                    t0s[j] = t1s[j]
+                if fxs[j] >= 0.5:
+                    x0s[j] = x1s[j]
+
     for row in prange(n_y):
-        for j in range(t.shape[0]):
-            tt, xx = t[j], x[j]
-            if not (-0.5 <= tt < n_t - 0.5 and -0.5 <= xx < n_x - 0.5):
-                out[row, j, :] = 0
+        for j in range(n):
+            if not inside[j]:
+                for c in range(n_c):
+                    out[row, j, c] = 0
                 continue
-            t0, t1, ft = _neighbours(tt, n_t)
-            x0, x1, fx = _neighbours(xx, n_x)
+            t0, t1, ft = t0s[j], t1s[j], fts[j]
+            x0, x1, fx = x0s[j], x1s[j], fxs[j]
             if nearest:
-                ti = t1 if ft >= 0.5 else t0
-                xi = x1 if fx >= 0.5 else x0
-                out[row, j, :] = volume[ti, row, xi, :]
+                for c in range(n_c):
+                    out[row, j, c] = volume[t0, row, x0, c]
                 continue
             for c in range(n_c):
                 # Blend along x, then t: 4 voxels in all.
