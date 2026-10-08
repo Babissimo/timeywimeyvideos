@@ -9,14 +9,10 @@ the picture).
 
 ## Setup
 
-You need Python 3.10+ and [ffmpeg](https://ffmpeg.org/download.html) (which
-includes `ffprobe`) on your `PATH`.
-
-```sh
-pip install -r requirements.txt
-```
-
-(Flask is only needed for the web front end.)
+You need [uv](https://docs.astral.sh/uv/) and
+[ffmpeg](https://ffmpeg.org/download.html) (which includes `ffprobe`) on your
+`PATH`. The first `uv run` fetches Python and the dependencies pinned in
+`uv.lock`.
 
 The sampling loops are compiled by [numba](https://numba.pydata.org/) the first
 time they run, which takes several seconds. The compiled code is cached in
@@ -25,8 +21,8 @@ time they run, which takes several seconds. The compiled code is cached in
 ## Usage
 
 ```sh
-python timeslice.py input.mp4 output.mp4 --angle 30 --preview   # quick look
-python timeslice.py input.mp4 output.mp4 --angle 30             # final cut
+uv run timeslice.py input.mp4 output.mp4 --angle 30 --preview   # quick look
+uv run timeslice.py input.mp4 output.mp4 --angle 30             # final cut
 ```
 
 | option | meaning |
@@ -65,7 +61,7 @@ different `--scale`.
 ## Web front end
 
 ```sh
-python webapp.py --videos ~/Movies
+uv run webapp.py --videos ~/Movies
 ```
 
 then open <http://127.0.0.1:8000>. The page offers the videos in the folder
@@ -237,5 +233,5 @@ against 4.4.
 
 `webapp.py` is the web server (Flask), and `web/` holds the page it serves.
 
-Run the geometry checks with `python test_timeslice.py`, and the server's with
-`python test_webapp.py` (or run both with `pytest`).
+Run the geometry checks with `uv run test_timeslice.py`, and the server's with
+`uv run test_webapp.py` (or run both with `uv run pytest`).
