@@ -13,6 +13,7 @@ import {
 } from "./options";
 import { PREVIEW_SCALE, type Sweep, type TX } from "./planner";
 import { limitDenominator, roundHalfEven } from "./pymath";
+import { changed, hasChanged } from "./sources";
 import type { Columns, Rate } from "./types";
 
 type Ends = [number, number, number, number];
@@ -39,31 +40,10 @@ export interface FrameInfo {
   full: FullSize | { error: string } | null;
 }
 
-/** Fetches a source by name, "videos/<file>" or "uploads/<file>". */
-export type Opener = (source: string, signal: AbortSignal) => Promise<Blob>;
-
-/** The kind and file name of a source, refusing anything outside the server's folders. */
-function sourceName(source: string): [string, string] {
-  const slash = source.indexOf("/");
-  const kind = slash < 0 ? source : source.slice(0, slash);
-  const name = slash < 0 ? "" : source.slice(slash + 1);
-  if ((kind !== "videos" && kind !== "uploads") || !name || name.includes("/")
-      || name.startsWith("."))
-    throw new Problem("Pick a video first.");
-  return [kind, name];
+interface Source { file: File; info: ClipInfo }
+interface Clip {
+  file: File; key: string; volume: Volume; fps: Rate; info: ClipInfo; face?: ImageData;
 }
-
-/** Fetch a source from the server that offers it. */
-export async function fetchSource(source: string, signal: AbortSignal): Promise<File> {
-  const [kind, name] = sourceName(source);
-  const res = await fetch(`/media/${kind}/${encodeURIComponent(name)}`, { signal });
-  if (res.status === 404) throw new Problem(`${name} isn't in ${kind} any more.`);
-  if (!res.ok) throw new Problem(`The server said ${res.status}.`);
-  return new File([await res.blob()], name);
-}
-
-interface Source { name: string; blob: Blob; info: ClipInfo }
-interface Clip { key: string; volume: Volume; fps: Rate; info: ClipInfo; face?: ImageData }
 
 /** What every frame of a sweep shares, for one set of options and the clip they load. */
 interface Sweeping {
@@ -88,7 +68,6 @@ const LOST = "The live view lost the GPU, perhaps for want of memory. Set a shor
 /** The live view on a canvas, which it draws with WebGL2. */
 export class Live {
   private readonly gl: WebGL2RenderingContext;
-  private readonly open: Opener;
   private slicer: Slicer;
   private source: Source | null = null;
   private clip: Clip | null = null;
@@ -97,13 +76,12 @@ export class Live {
   private sweeping: Sweeping | null = null;
   private readonly listening = new AbortController();
 
-  constructor(canvas: HTMLCanvasElement, open: Opener = fetchSource) {
+  constructor(canvas: HTMLCanvasElement) {
     // The cuboid copies the canvas whenever it redraws, so the drawing has to stay.
     const gl = canvas.getContext("webgl2", { alpha: false, antialias: false, depth: false,
                                              stencil: false, preserveDrawingBuffer: true });
     if (!gl) throw new Problem("The live view needs WebGL2, which this browser doesn't offer.");
     this.gl = gl;
-    this.open = open;
     try {
       this.slicer = new Slicer(gl);
     } catch (error) {
@@ -126,17 +104,16 @@ export class Live {
 
   /**
    * Draw the frame `pos` of the way through (0 to 1) the sweep these options make of a
-   * source, and describe it. Loads the clip first when the source, or the options it is
+   * video file, and describe it. Loads the clip first when the file, or the options it is
    * loaded with, change, calling `progress` as it decodes. Throws a Problem for the page to
    * show. Make one call at a time.
    */
-  async show(source: string, values: OptionValues, pos: number,
+  async show(file: File, values: OptionValues, pos: number,
              progress?: (done: number, total: number) => void): Promise<FrameInfo> {
-    sourceName(source);  // refuse a source outside the server's folders first
     if (!this.parsed || !sameValues(this.parsed.values, values))
       this.parsed = { values: { ...values }, opts: readOptions(values) };
     const { opts } = this.parsed;
-    const clip = await this.load(source, opts, progress);
+    const clip = await this.load(file, opts, progress);
     if (this.sweeping?.opts !== opts || this.sweeping.clip !== clip)
       this.sweeping = this.sweepFor(opts, clip);
     const { sweep, noise, info } = this.sweeping;
@@ -176,6 +153,15 @@ export class Live {
       clip.face = new ImageData(pixels, volume.width, volume.height);
     }
     return clip.face;
+  }
+
+  /**
+   * Take `to`, the same file opened again, in place of `from` for the clip held, so it serves
+   * `to` without loading afresh.
+   */
+  adopt(from: File, to: File): void {
+    if (this.source?.file === from) this.source.file = to;
+    if (this.clip?.file === from) this.clip.file = to;
   }
 
   /** Let go of the clip and its file, stopping any load under way. */
@@ -232,32 +218,34 @@ export class Live {
   }
 
   /** The clip for these options, loading it if it changed, with the loop's crossfades done. */
-  private async load(source: string, opts: Options,
+  private async load(file: File, opts: Options,
                      progress?: (done: number, total: number) => void): Promise<Clip> {
     if (this.gl.isContextLost()) throw new Problem(LOST);
-    const key = JSON.stringify([source, opts.scale, opts.start, opts.duration, opts.loopFade,
+    const key = JSON.stringify([opts.scale, opts.start, opts.duration, opts.loopFade,
                                 opts.sideFade]);
-    if (this.clip?.key === key) return this.clip;
+    if (this.clip?.file === file && this.clip.key === key) return this.clip;
     const controller = new AbortController();
     this.loading = controller;
     const { signal } = controller;
     try {
-      const { blob, info } = await this.fetch(source, signal);
+      const { info } = await this.describe(file, signal);
       const options: LoadOptions = {
         scale: opts.scale * PREVIEW_SCALE, timeScale: PREVIEW_SCALE,
         start: opts.start ?? undefined, duration: opts.duration ?? undefined, fast: true, signal,
       };
-      const planned = await planLoad(blob, options);
+      const planned = await planLoad(file, options);
       // Refuse fades that don't fit before decoding the clip.
       const [frames, columns] = loopFades(planned.frames, planned.width,
                                           planned.fps.num / planned.fps.den, opts, PREVIEW_SCALE);
       const volume = this.allocate(planned);
       try {
-        await load(blob, options, (i, frame) => {
+        await load(file, options, (i, frame) => {
           volume.upload(i, frame);
           frame.close();
         }, progress);
         signal.throwIfAborted();
+        // The context can be lost before its event arrives, and uploads to a lost one do nothing.
+        if (this.gl.isContextLost()) throw new Problem(LOST);
         // The fades work in place, so a change to them loads the clip afresh.
         volume.crossfade(frames, 0);
         volume.crossfade(columns, 2);
@@ -265,10 +253,12 @@ export class Live {
         volume.dispose();
         throw error;
       }
-      this.clip = { key, volume, fps: planned.fps, info };
+      this.clip = { file, key, volume, fps: planned.fps, info };
       return this.clip;
     } catch (error) {
       if (signal.aborted) throw signal.reason;  // whatever stopped it on the way
+      if (!(error instanceof Problem) && await hasChanged(file))
+        throw new Problem(changed(file.name));
       if (error instanceof VideoError) throw new Problem(error.message);
       throw error;
     } finally {
@@ -276,14 +266,13 @@ export class Live {
     }
   }
 
-  /** The source's file and what it holds, fetched once. */
-  private async fetch(source: string, signal: AbortSignal): Promise<Source> {
-    if (this.source?.name === source) return this.source;
+  /** What a file holds, probed once. */
+  private async describe(file: File, signal: AbortSignal): Promise<Source> {
+    if (this.source?.file === file) return this.source;
     this.source = null;
-    const blob = await this.open(source, signal);
-    const info = await probe(blob);
+    const info = await probe(file);
     signal.throwIfAborted();
-    this.source = { name: source, blob, info };
+    this.source = { file, info };
     return this.source;
   }
 
