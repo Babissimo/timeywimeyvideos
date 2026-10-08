@@ -599,6 +599,16 @@ def test_crossfade_only_changes_the_frames_it_blends():
     raises(ValueError, timeslice.crossfade, long_volume.copy(), 7)  # over half of 13
 
 
+def test_crossfade_can_blend_across_the_sides():
+    # The same blend, of the last columns into the first rather than frames.
+    sideways = np.ascontiguousarray(long_volume.transpose(2, 1, 0, 3))
+    expected = timeslice.crossfade(sideways, 2).transpose(2, 1, 0, 3)
+    looped = timeslice.crossfade(long_volume.copy(), 2, axis=2)
+    assert looped.shape == (13, 3, 3, 3)
+    assert np.array_equal(looped, expected)
+    raises(ValueError, timeslice.crossfade, long_volume.copy(), 3, axis=2)  # over half of 5
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):

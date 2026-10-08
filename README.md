@@ -34,6 +34,7 @@ uv run timeslice.py input.mp4 output.mp4 --angle 30             # final cut
 | `--loop` | make a video that loops seamlessly: time runs round in a ring (see below) |
 | `--loop-fade S` | with `--loop`: blend the clip's last S seconds into its first to hide the join (default 0) |
 | `--loop-sides` | with `--loop`: wrap round the picture's sides too, so the frame can move sideways (see below) |
+| `--loop-side-fade PX` | with `--loop-sides`: blend the picture's last PX columns into its first to hide the seam (default 0) |
 | `--noise A` | push each point of the surface up to A frames off the plane with Perlin noise (default 0: flat; see below) |
 | `--noise-size PX` | roughly how far apart the bumps are, in pixels (default 64) |
 | `--noise-speed PX` | how fast the bumps change, in pixels per output frame (default 1; 0 keeps them still) |
@@ -259,6 +260,9 @@ either, so perpendicular noise fits at every angle.
 
 The picture's right edge now meets its left, so unless the footage wraps
 round (a 360° panorama, say), a seam shows wherever a frame crosses it.
+`--loop-side-fade PX` hides it the way `--loop-fade` hides the join in
+time, blending the picture's last PX columns into its first PX, which makes
+it PX narrower (after `--scale`). Like `--loop-fade`, it can be at most half.
 
 ## Code layout
 
@@ -289,8 +293,9 @@ round (a 360° panorama, say), a seam shows wherever a frame crosses it.
   `sample` gives at `surface`'s points.
 - `slice_frame(...)` makes an output frame, with `sample_columns` when the
   surface is flat and `sample_noisy_columns` when it's bumpy.
-- `crossfade(volume, frames)` blends a clip's last frames into its first,
-  in place, for `--loop-fade`.
+- `crossfade(volume, n)` blends a clip's last n frames into its first, in
+  place, for `--loop-fade`, or with `axis=2` its last n columns into its
+  first, for `--loop-side-fade`.
 - `main()` handles decoding and encoding (via ffmpeg).
 
 `webapp.py` is the web server (Flask), and `web/` holds the page it serves.

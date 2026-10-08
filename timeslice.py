@@ -147,25 +147,27 @@ def load_video(path, scale=1.0, time_scale=1.0, start=None, duration=None,
     return volume[:n], fps
 
 
-def crossfade(volume, frames):
-    """Blend the last `frames` frames of a (T, H, W, C) volume into its first,
-    in place, and return the first T - frames: a clip that runs on smoothly
-    from its end into its start when time runs round in a ring.
+def crossfade(volume, n, axis=0):
+    """Blend the last `n` frames of a (T, H, W, C) volume into its first, in
+    place, and return the first T - n: a clip that runs on smoothly from its
+    end into its start when time runs round in a ring. With axis=2 it blends
+    the last n columns into the first instead, for when x wraps round too.
 
-    Frame i of the fade mixes the clip's frame i with frame T - frames + i,
-    as far past the loop's end as frame i is past its start, taking more of
-    frame i the further in it is. The fade can be at most half the clip.
+    Slice i of the fade mixes the clip's slice i with slice T - n + i, as far
+    past the loop's end as slice i is past its start, taking more of slice i
+    the further in it is. The fade can be at most half the clip.
     """
-    length = len(volume) - frames
-    if not 0 <= frames <= length:
-        raise ValueError(f"a {frames}-frame fade doesn't fit in a "
-                         f"{len(volume)}-frame clip: it can be at most half")
-    for i in range(frames):
-        w = np.float32((i + 1) / (frames + 1))  # float32 halves the frame-sized temporaries
-        mixed = volume[length + i] * (1 - w)
-        mixed += volume[i] * w
-        volume[i] = (mixed + 0.5).astype(np.uint8)  # rounded, as the samplers do
-    return volume[:length]
+    ring = np.moveaxis(volume, axis, 0)  # a view, so the fade lands in volume
+    length = len(ring) - n
+    if not 0 <= n <= length:
+        raise ValueError(f"a fade of {n} doesn't fit in a clip {len(ring)} "
+                         "long: it can be at most half")
+    for i in range(n):
+        w = np.float32((i + 1) / (n + 1))  # float32 halves the frame-sized temporaries
+        mixed = ring[length + i] * (1 - w)
+        mixed += ring[i] * w
+        ring[i] = (mixed + 0.5).astype(np.uint8)  # rounded, as the samplers do
+    return np.moveaxis(ring[:length], 0, axis)
 
 
 def open_writer(path, width, height, fps, preset="medium", crf=18):
@@ -882,6 +884,10 @@ def main():
                         help="with --loop: let the picture's sides wrap round "
                              "too, its left edge following its right, so the "
                              "frame can move sideways (--motion perpendicular)")
+    parser.add_argument("--loop-side-fade", type=float, metavar="PX",
+                        help="with --loop-sides: blend the picture's last PX "
+                             "columns into its first, so the seam where its "
+                             "right edge meets its left doesn't show (default 0)")
     parser.add_argument("--noise", type=float, default=0.0, metavar="A",
                         help="push each point of the slicing surface up to A "
                              "frames off the plane with Perlin noise (default "
@@ -920,6 +926,10 @@ def main():
                      "stays inside the video")
     if args.loop_sides and not args.loop:
         parser.error("--loop-sides needs --loop")
+    if args.loop_side_fade is not None and not args.loop_sides:
+        parser.error("--loop-side-fade needs --loop-sides")
+    if (args.loop_side_fade or 0) < 0:
+        parser.error("--loop-side-fade can't be negative")
     if args.loop and args.motion and not args.loop_sides:
         parser.error("--motion needs --loop-sides on a loop: unless the sides "
                      "wrap round, a looping frame can only move straight "
@@ -967,6 +977,13 @@ def main():
                      f"{n_frames / 2 / rate:.3g} s.")
         volume = crossfade(volume, fade)
         n_frames = len(volume)
+    if args.loop_side_fade:
+        columns = round(args.loop_side_fade * shrink)  # of the frames loaded
+        if 2 * columns > width:
+            sys.exit(f"--loop-side-fade can be at most half the width, "
+                     f"{width / shrink / 2:g} pixels.")
+        volume = crossfade(volume, columns, axis=2)
+        width = volume.shape[2]
 
     try:
         sweep = plan_sweep(n_frames, width, args.slice, args.angle, args.inside,
