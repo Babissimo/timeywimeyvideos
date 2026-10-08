@@ -189,6 +189,34 @@ def test_samplers_can_run_round_time_in_a_ring():
     assert (timeslice.sample_columns(volume, t, x)[:, :4] == 0).all()
 
 
+def test_samplers_can_run_round_the_sides_in_a_ring():
+    # With wrap_x, x reads column x mod W too, the left edge following the
+    # right. A strided view of the clip reads the same as a copy.
+    t = np.array([2.0, 3.0, 4.0, 5.0, 3.0])
+    x = np.array([-1.0, W, W + 2.4, 2 * W - 0.5, -W - 7.0])
+    rows = np.arange(H)[:, None]
+    strided = np.concatenate([volume, volume[:, :, :3]], axis=2)[:, :, :W]
+    assert not strided.flags.c_contiguous
+    for vol in [volume, strided]:
+        for nearest in [False, True]:
+            frame = timeslice.sample_columns(vol, t, x, nearest, wrap_x=True)
+            assert np.array_equal(frame, timeslice.sample(vol, t, rows, x, nearest,
+                                                          wrap_x=True))
+            assert np.array_equal(frame, timeslice.sample_noisy_columns(
+                vol, t, x, (0.0, 0.0), Noise(1), 0, nearest, wrap_x=True))
+            assert np.array_equal(frame[:, 0], volume[2, :, W - 1])
+            assert np.array_equal(frame[:, 1], volume[3, :, 0])
+            assert np.array_equal(frame[:, 4], volume[3, :, (-7) % W])
+        assert np.array_equal(frame[:, 2], volume[4, :, 2])
+        assert np.array_equal(frame[:, 3], volume[5, :, 0])
+    blend = timeslice.sample_columns(volume, t, x, wrap_x=True)[:, 3]
+    assert np.allclose(blend, (volume[5, :, W - 1] / 2 + volume[5, :, 0] / 2), atol=0.5)
+    # Both at once: a point past the end of the clip and past its right edge.
+    corner = timeslice.sample_columns(volume, [T + 1.0], [W + 1.0], wrap=True, wrap_x=True)
+    assert np.array_equal(corner[:, 0], volume[1, :, 1])
+    assert (timeslice.sample_columns(volume, t, x)[:, :4] == 0).all()
+
+
 # Surface noise.
 
 Noise = timeslice.Noise

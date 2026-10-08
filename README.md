@@ -243,7 +243,8 @@ render's.
 - `sample(volume, t, y, x)` reads the video at any (t, y, x) positions, so it
   works for any surface. Each point blends the 8 voxels around it, weighted
   by closeness (linear interpolation); points outside the cuboid are black.
-  With `wrap`, time runs round in a ring instead, for loops.
+  With `wrap`, time runs round in a ring instead, for loops, and with
+  `wrap_x` so does x.
 - `sample_columns(volume, t, x)` is a faster version for slices made of whole
   source columns, which is what any tilt about the y axis gives. It only
   blends across x and t (4 voxels), or copies the nearest one for previews.

@@ -184,8 +184,9 @@ def open_writer(path, width, height, fps, preset="medium", crf=18):
 # voxels is a blend of its neighbours, each weighted by how close the point is
 # to it (linear interpolation). Points outside the cuboid come out black,
 # unless time wraps: then it runs round in a ring, the first frame following
-# the last, and no point is outside it in time. The loops are compiled by numba
-# and spread across all CPU cores.
+# the last, and no point is outside it in time. x can wrap the same way, the
+# picture's left edge following its right. The loops are compiled by numba and
+# spread across all CPU cores.
 
 @njit(cache=True)
 def _neighbours(coord, n, wrap=False):
@@ -199,18 +200,18 @@ def _neighbours(coord, n, wrap=False):
 
 
 @njit(parallel=True, cache=True)
-def _sample_points(volume, t, y, x, nearest, wrap, out):
+def _sample_points(volume, t, y, x, nearest, wrap, wrap_x, out):
     n_t, n_y, n_x, n_c = volume.shape
     for i in prange(out.shape[0]):
         for j in range(out.shape[1]):
             tt, yy, xx = t[i, j], y[i, j], x[i, j]
             if not ((wrap or -0.5 <= tt < n_t - 0.5) and -0.5 <= yy < n_y - 0.5
-                    and -0.5 <= xx < n_x - 0.5):
+                    and (wrap_x or -0.5 <= xx < n_x - 0.5)):
                 out[i, j, :] = 0
                 continue
             t0, t1, ft = _neighbours(tt, n_t, wrap)
             y0, y1, fy = _neighbours(yy, n_y)
-            x0, x1, fx = _neighbours(xx, n_x)
+            x0, x1, fx = _neighbours(xx, n_x, wrap_x)
             if nearest:
                 ti = t1 if ft >= 0.5 else t0
                 yi = y1 if fy >= 0.5 else y0
@@ -227,15 +228,15 @@ def _sample_points(volume, t, y, x, nearest, wrap, out):
 
 
 @njit(cache=True, inline="always")  # a call per pixel would cost more than the read
-def _read_in_row(volume, tt, row, xx, nearest, wrap, out, j):
+def _read_in_row(volume, tt, row, xx, nearest, wrap, wrap_x, out, j):
     """Read the volume at (tt, row, xx) into out[row, j], blending across x
     and t only, since row is a whole number."""
     n_t, _, n_x, n_c = volume.shape
-    if not ((wrap or -0.5 <= tt < n_t - 0.5) and -0.5 <= xx < n_x - 0.5):
+    if not ((wrap or -0.5 <= tt < n_t - 0.5) and (wrap_x or -0.5 <= xx < n_x - 0.5)):
         out[row, j, :] = 0
         return
     t0, t1, ft = _neighbours(tt, n_t, wrap)
-    x0, x1, fx = _neighbours(xx, n_x)
+    x0, x1, fx = _neighbours(xx, n_x, wrap_x)
     if nearest:
         ti = t1 if ft >= 0.5 else t0
         xi = x1 if fx >= 0.5 else x0
@@ -249,7 +250,7 @@ def _read_in_row(volume, tt, row, xx, nearest, wrap, out, j):
 
 
 @njit(parallel=True, cache=True)
-def _sample_columns(volume, t, x, nearest, wrap, out):
+def _sample_columns(volume, t, x, nearest, wrap, wrap_x, out):
     n_t, n_y, n_x, n_c = volume.shape
     n = t.shape[0]
     # Every row of output column j reads the same source columns with the same
@@ -259,10 +260,11 @@ def _sample_columns(volume, t, x, nearest, wrap, out):
     x0s, x1s = np.empty(n, np.int64), np.empty(n, np.int64)
     fts, fxs = np.empty(n), np.empty(n)
     for j in range(n):
-        inside[j] = (wrap or -0.5 <= t[j] < n_t - 0.5) and -0.5 <= x[j] < n_x - 0.5
+        inside[j] = ((wrap or -0.5 <= t[j] < n_t - 0.5)
+                     and (wrap_x or -0.5 <= x[j] < n_x - 0.5))
         if inside[j]:
             t0s[j], t1s[j], fts[j] = _neighbours(t[j], n_t, wrap)
-            x0s[j], x1s[j], fxs[j] = _neighbours(x[j], n_x)
+            x0s[j], x1s[j], fxs[j] = _neighbours(x[j], n_x, wrap_x)
             if nearest:  # keep only the closest voxel, in t0s and x0s
                 if fts[j] >= 0.5:
                     t0s[j] = t1s[j]
@@ -288,32 +290,33 @@ def _sample_columns(volume, t, x, nearest, wrap, out):
                 out[row, j, c] = min(255, int(v + 0.5))
 
 
-def sample(volume, t, y, x, nearest=False, wrap=False):
+def sample(volume, t, y, x, nearest=False, wrap=False, wrap_x=False):
     """Sample a (T, H, W, C) volume at any continuous (t, y, x) points.
 
     t, y and x broadcast together to the (height, width) of the output frame,
     so any surface through the cuboid can be read this way. With nearest,
     each pixel is copied from the closest voxel instead of blended. With
-    wrap, time runs round in a ring: time t reads frame t mod T.
+    wrap, time runs round in a ring: time t reads frame t mod T. With wrap_x,
+    so does x: position x reads column x mod W.
     """
     shape = np.broadcast_shapes(np.shape(t), np.shape(y), np.shape(x))
     t, y, x = (np.broadcast_to(np.asarray(a, np.float64), shape) for a in (t, y, x))
     out = np.empty(shape + volume.shape[3:], np.uint8)
-    _sample_points(volume, t, y, x, nearest, wrap, out)
+    _sample_points(volume, t, y, x, nearest, wrap, wrap_x, out)
     return out
 
 
-def sample_columns(volume, t, x, nearest=False, wrap=False):
+def sample_columns(volume, t, x, nearest=False, wrap=False, wrap_x=False):
     """A faster sample() for slices built from whole source columns.
 
     Output column j is the full-height column of the input at time t[j] and
     position x[j], so only x and t need blending (4 voxels, not 8). Slices that
-    only tilt about the y axis have this shape. nearest and wrap are as for
-    sample().
+    only tilt about the y axis have this shape. nearest, wrap and wrap_x are
+    as for sample().
     """
     out = np.empty((volume.shape[1], len(t)) + volume.shape[3:], np.uint8)
     _sample_columns(volume, np.asarray(t, np.float64), np.asarray(x, np.float64),
-                    nearest, wrap, out)
+                    nearest, wrap, wrap_x, out)
     return out
 
 
@@ -503,7 +506,7 @@ class Noise(NamedTuple):
 
 @njit(parallel=True, cache=True)
 def _sample_noisy_columns(volume, t, x, push_t, push_x, nodes, cols, col_w,
-                          rows, row_w, nearest, wrap, out):
+                          rows, row_w, nearest, wrap, wrap_x, out):
     for row in prange(volume.shape[1]):
         # Blend the whole row's bumps from the nodes, then read the row.
         bumps = np.empty(t.shape[0])
@@ -511,24 +514,26 @@ def _sample_noisy_columns(volume, t, x, push_t, push_x, nodes, cols, col_w,
                    np.empty(nodes.shape[1]), bumps)
         for j in range(t.shape[0]):
             _read_in_row(volume, t[j] + push_t * bumps[j], row,
-                         x[j] + push_x * bumps[j], nearest, wrap, out, j)
+                         x[j] + push_x * bumps[j], nearest, wrap, wrap_x, out, j)
 
 
-def sample_noisy_columns(volume, t, x, push, noise, f, nearest=False, wrap=False):
+def sample_noisy_columns(volume, t, x, push, noise, f, nearest=False, wrap=False,
+                         wrap_x=False):
     """A faster sample() for column slices pushed off their plane by noise.
 
     Output pixel (row, j) is read at time t[j] and position x[j], moved by
     push (a (t, x) pair) times the noise at that pixel of output frame f.
     It works out the noise as it reads, and since every pixel stays in its
     own row, only blends across x and t (4 voxels, not 8). It gives exactly
-    what sample() would at surface()'s points. nearest and wrap are as for
-    sample().
+    what sample() would at surface()'s points. nearest, wrap and wrap_x are
+    as for sample().
     """
     height = volume.shape[1]
     out = np.empty((height, len(t)) + volume.shape[3:], np.uint8)
     _sample_noisy_columns(volume, np.asarray(t, np.float64), np.asarray(x, np.float64),
                           float(push[0]), float(push[1]),
-                          *noise._grid(len(t), height, f), nearest, wrap, out)
+                          *noise._grid(len(t), height, f), nearest, wrap, wrap_x,
+                          out)
     return out
 
 
