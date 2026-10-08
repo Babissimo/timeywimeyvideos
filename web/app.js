@@ -1,12 +1,15 @@
-"use strict";
-// The page for webapp.py: choose a source, set the slice, watch live frames
-// from the server, see where the slice sits in the cuboid, and run renders.
+// The page for webapp.py: choose a source, set the slice, watch it play live
+// (sliced here, on the GPU), see where the slice sits in the cuboid, and run
+// renders.
+
+import { Live } from "./src/live.ts";
 
 const $ = (id) => document.getElementById(id);
 
 const state = {
   source: "",
-  info: null,      // the server's description of the frame on screen
+  chosen: 0,       // how many times a source has been chosen
+  info: null,      // the live view's description of the frame on screen
   pos: 0.5,        // how far through the output video, 0 to 1
   playing: false,
   scrubbing: false,
@@ -110,35 +113,29 @@ function bytes(n) {
   return `${Math.max(1, Math.round(n / 1e3))} KB`;
 }
 
-// Paint raw RGB bytes from the server onto a canvas.
-function paint(canvas, width, height, rgb) {
-  if (canvas.width !== width || canvas.height !== height) {
-    canvas.width = width;
-    canvas.height = height;
-  }
-  const ctx = canvas.getContext("2d");
-  const image = ctx.createImageData(width, height);
-  const px = image.data;
-  for (let i = 0, j = 0; i < rgb.length; i += 3, j += 4) {
-    px[j] = rgb[i];
-    px[j + 1] = rgb[i + 1];
-    px[j + 2] = rgb[i + 2];
-    px[j + 3] = 255;
-  }
-  ctx.putImageData(image, 0, 0);
-}
-
-function frameURL(opts, pos) {
-  return "/api/frame?" + new URLSearchParams({ ...opts, pos });
-}
-
 // ---------------------------------------------------------------------------
-// Live preview. Only one frame request is in flight at a time; if the options
-// or position change meanwhile, the latest ones are fetched next, so dragging
-// a slider never queues up stale frames.
+// Live preview. Only one frame is worked on at a time; if the options or
+// position change meanwhile, the latest ones are shown next, so dragging a
+// slider never queues up stale frames.
 
+let live = null;  // made on first use, so a browser without WebGL2 gets a message
+let unable = null;  // why it couldn't be made, as it is tried only once
 let busy = false;
 let again = false;
+
+function liveView() {
+  if (!live && !unable) {
+    try {
+      live = new Live($("live"));
+      // This runs after Live's own listener, which readies it to draw again.
+      $("live").addEventListener("webglcontextrestored", refresh);
+    } catch (err) {
+      unable = err;
+    }
+  }
+  if (unable) throw unable;
+  return live;
+}
 
 function refresh() {
   again = true;
@@ -151,28 +148,38 @@ async function pump() {
   if (!state.source) return;
   busy = true;
   const opts = options();
-  const slow = setTimeout(() => showMessage("Loading the clip…"), 300);
+  // Once another source is chosen, the message is that one's to give.
+  const chosen = state.chosen;
+  const loading = (text) => {
+    if (state.chosen === chosen) showMessage(text);
+  };
+  let slow = false;
+  const timer = setTimeout(() => {
+    slow = true;
+    loading("Loading the clip…");
+  }, 300);
   try {
-    const res = await fetch(frameURL(opts, state.pos));
-    if (!res.ok) throw await problemFrom(res);
-    const info = JSON.parse(res.headers.get("X-Info"));
-    paint($("live"), info.width, info.height, new Uint8Array(await res.arrayBuffer()));
+    const info = await liveView().show(opts.source, opts, state.pos, (done, total) => {
+      if (slow) loading(`Loading the clip… ${Math.floor(100 * done / total)}%`);
+    });
     const resized = !state.info || state.info.frames !== info.frames;
     state.info = info;
     if (resized) anchor();
     hideMessage();
     describe();
     drawCube();
-    loadFace(opts);
+    loadFace();
   } catch (err) {
-    pause();
-    showMessage(err.message,
-      err.kind === "does_not_fit" ?
-        ["Let black in instead", () => setEdges("black")] :
-      err.kind === "sideways" &&
-        ["Wrap round the sides too", () => { $("loop-sides").checked = true; slicesChanged(); }]);
+    if (err.name !== "AbortError") {  // else another source took over
+      pause();
+      showMessage(err.message,
+        err.kind === "does_not_fit" ?
+          ["Let black in instead", () => setEdges("black")] :
+        err.kind === "sideways" &&
+          ["Wrap round the sides too", () => { $("loop-sides").checked = true; slicesChanged(); }]);
+    }
   } finally {
-    clearTimeout(slow);
+    clearTimeout(timer);
     busy = false;
     pump();
   }
@@ -209,7 +216,7 @@ function describe() {
 }
 
 // Playback runs on the clock: each animation frame works out which output
-// frame is due and asks for it, skipping any the server can't keep up with.
+// frame is due and shows it, skipping any the live view can't keep up with.
 
 const clock = { start: 0, frame: 0 };
 
@@ -386,11 +393,13 @@ async function loadSources(select) {
 
 async function chooseSource(source) {
   pause();
+  live?.unload();  // the file may have changed, as an upload of the same name does
   state.source = source;
+  state.chosen++;
   state.info = null;
   state.pos = 0.5;
   face = null;
-  faceKey = "";
+  faceImage = null;
   drawCube();
   $("source-info").textContent = "";
   $("live-info").textContent = "";
@@ -477,26 +486,21 @@ const VIEWS = {
   side: [-Math.PI / 2, 0],
 };
 const camera = { yaw: VIEWS.three[0], pitch: VIEWS.three[1], zoom: 1 };
-let face = null;      // canvas holding the clip's first frame
-let faceKey = "";
+let face = null;       // canvas holding the clip's first frame
+let faceImage = null;  // the live view's first frame, which it keeps while it keeps the clip
 
-async function loadFace(opts) {
-  const key = [opts.source, opts.start, opts.duration, opts.scale, opts.loop_fade,
-               opts.loop_side_fade].join("|");
-  if (key === faceKey) return;
-  faceKey = key;
+function loadFace() {
+  const image = live.face();
+  if (image === faceImage) return;
+  faceImage = image;
   face = null;
-  try {
-    const res = await fetch(frameURL(
-      { ...opts, slice: "rotate", angle: 0, inside: "", motion: "", noise: "" }, 0));
-    if (!res.ok || key !== faceKey) return;
-    const info = JSON.parse(res.headers.get("X-Info"));
-    const canvas = document.createElement("canvas");
-    paint(canvas, info.width, info.height, new Uint8Array(await res.arrayBuffer()));
-    if (key !== faceKey) return;
-    face = canvas;
-    drawCube();
-  } catch { /* the cuboid just goes without */ }
+  if (image) {
+    face = document.createElement("canvas");
+    face.width = image.width;
+    face.height = image.height;
+    face.getContext("2d").putImageData(image, 0, 0);
+  }
+  drawCube();
 }
 
 // A function from volume coordinates (x, y, t) to [screen x, screen y, depth].

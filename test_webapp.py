@@ -1,13 +1,10 @@
 """Checks for the web front end's server. Run with `python test_webapp.py` (or
 pytest). They make a tiny clip with ffmpeg in a temporary folder."""
 
-import json
 import subprocess
 import tempfile
 import time
 from pathlib import Path
-
-import numpy as np
 
 import timeslice
 import webapp
@@ -23,109 +20,45 @@ subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
 client = webapp.app.test_client()
 
 
-def frame(**params):
-    res = client.get("/api/frame", query_string={"source": "videos/clip.mp4", **params})
-    if res.status_code != 200:
-        return res, None, None
-    info = json.loads(res.headers["X-Info"])
-    image = np.frombuffer(res.data, np.uint8).reshape(info["height"], info["width"], 3)
-    return res, info, image
+def test_serves_the_built_page():
+    page = tmp / "dist"
+    (page / "assets").mkdir(parents=True)
+    (page / "index.html").write_text("<script src=/assets/app.js></script>")
+    (page / "assets" / "app.js").write_text("// the page")
+    built = webapp.PAGE
+    try:
+        webapp.PAGE = page
+        res = client.get("/")
+        assert res.status_code == 200 and b"/assets/app.js" in res.data
+        assert res.cache_control.max_age == 0
+        assert client.get("/assets/app.js").data == b"// the page"
+        assert client.get("/assets/missing.js").status_code == 404
+        assert client.get("/assets/..%2F..%2Fwebapp.py").status_code == 404
+        webapp.PAGE = tmp / "unbuilt"
+        res = client.get("/")
+        assert res.status_code == 503 and b"npm run build" in res.data
+    finally:
+        webapp.PAGE = built
 
 
 def test_lists_sources():
     assert client.get("/api/sources").get_json()["videos"] == ["clip.mp4"]
 
 
-def test_live_frames_match_a_preview_render():
-    volume, _ = timeslice.load_video(str(clip), 0.5, 0.5, fast=True)
-    _, info, image = frame(angle=0, pos=0)
-    assert info["volume"] == list(volume.shape[:3])
-    assert np.array_equal(image, volume[0])
-
-    _, info, image = frame(angle=30, slice="rotate", pos=0.5)
-    sweep = timeslice.plan_sweep(len(volume), volume.shape[2], "rotate", 30)
-    f = round(0.5 * (sweep.frames - 1))
-    assert info["frame"] == f and info["frames"] == sweep.frames
-    assert np.array_equal(image, timeslice.sample_columns(volume, *sweep.at(f), nearest=True))
-
-
-def test_live_frames_with_noise_match_a_preview_render():
-    volume, _ = timeslice.load_video(str(clip), 0.5, 0.5, fast=True)
-    noise = timeslice.Noise(3, size=10, speed=0.5, direction="perpendicular", seed=4)
-    _, info, image = frame(angle=30, pos=0.25, noise=3, noise_size=10, noise_speed=0.5,
-                           noise_direction="perpendicular", noise_seed=4)
-    half = noise.scaled(0.5)
-    sweep = timeslice.plan_sweep(len(volume), volume.shape[2], "rotate", 30, noise=half)
-    f = round(0.25 * (sweep.frames - 1))
-    assert info["frame"] == f and info["frames"] == sweep.frames
-    assert np.array_equal(image, timeslice.slice_frame(volume, sweep, f, half, nearest=True))
-    full = timeslice.plan_sweep(60, 64, "rotate", 30, noise=noise)
-    assert info["full"]["frames"] == full.frames
-
-
-def test_frame_reports_full_size_render():
-    _, info, _ = frame(angle=20, slice="shear")
-    assert info["full"]["width"] == 64 and info["full"]["height"] == 48
-    assert info["fps"] == 10  # half the input's 20 fps, like a preview render
-
-
-def test_too_steep_for_inside_says_so():
-    res, _, _ = frame(angle=80, inside=1)  # up to about 69 degrees fits
-    assert res.status_code == 400
-    assert res.get_json()["kind"] == "does_not_fit"
-    assert "Let black in or Wrap round" in res.get_json()["error"]
-
-
-def test_live_loops_match_a_preview_render():
-    volume, _ = timeslice.load_video(str(clip), 0.5, 0.5, fast=True)  # 30 frames at 10 fps
-    looped = timeslice.crossfade(volume, 5)  # half a second
-    _, info, image = frame(angle=30, loop=1, loop_fade=0.5, pos=0.25)
-    sweep = timeslice.plan_sweep(len(looped), 32, "rotate", 30, loop=True)
-    f = round(0.25 * (sweep.frames - 1))
-    assert info["loop"] and not info["sides"]
-    assert info["frame"] == f and info["frames"] == sweep.frames == 25
-    assert np.array_equal(image, timeslice.slice_frame(looped, sweep, f, nearest=True))
-    assert info["full"]["frames"] == 50  # 60 frames less a second's fade
-
-    volume, _ = timeslice.load_video(str(clip), 0.5, 0.5, fast=True)
-    looped = timeslice.crossfade(volume, 4, axis=2)  # 8 pixels at full size
-    _, info, image = frame(angle=80, loop=1, loop_sides=1, motion="perpendicular",
-                           loop_side_fade=8, inside=1, pos=0.5)
-    sweep = timeslice.plan_sweep(30, 28, "rotate", 80, motion="perpendicular",
-                                 loop=True, sides=True)
-    f = round(0.5 * (sweep.frames - 1))
-    assert info["sides"] and info["width"] == 28 and info["frames"] == sweep.frames
-    assert np.array_equal(image, timeslice.slice_frame(looped, sweep, f, nearest=True))
-    assert info["full"]["width"] == 56
-
-
-def test_a_loop_pushed_sideways_offers_to_wrap_the_sides():
-    res, _, _ = frame(angle=20, loop=1, noise=8, noise_direction="perpendicular")
-    assert res.status_code == 400 and res.get_json()["kind"] == "sideways"
-    assert frame(angle=20, loop=1, loop_sides=1, noise=8,
-                 noise_direction="perpendicular")[0].status_code == 200
-
-
 def test_bad_options_are_refused():
-    assert frame(angle="steep")[0].status_code == 400
-    assert frame(slice="twist")[0].status_code == 400
-    assert frame(scale=0)[0].status_code == 400
-    assert frame(fps="-3")[0].status_code == 400
-    assert frame(noise=-1)[0].status_code == 400
-    assert frame(noise=2, noise_size=0)[0].status_code == 400
-    assert frame(noise=2, noise_direction="sideways")[0].status_code == 400
-    assert frame(noise=2, noise_seed="1.5")[0].status_code == 400
-    assert frame(noise=2, noise_seed=-1)[0].status_code == 400
-    assert frame(loop=1, loop_fade=-1)[0].status_code == 400
-    assert frame(loop=1, loop_fade=2)[0].status_code == 400  # over half the 3 s clip
-    assert frame(loop=1, loop_sides=1, loop_side_fade=40)[0].status_code == 400
-    assert frame(loop=1, loop_sides=1, motion="longest")[0].status_code == 400
+    for options in [dict(angle="steep"), dict(slice="twist"), dict(scale=0), dict(fps="-3"),
+                    dict(noise=-1), dict(noise=2, noise_size=0),
+                    dict(noise=2, noise_direction="sideways"), dict(noise=2, noise_seed="1.5"),
+                    dict(noise=2, noise_seed=-1), dict(loop=1, loop_fade=-1),
+                    dict(loop=1, loop_sides=1, motion="longest")]:
+        res = client.post("/api/render", json={"source": "videos/clip.mp4", **options})
+        assert res.status_code == 400, options  # before any render starts
 
 
 def test_only_serves_files_in_its_folders():
     for source in ["videos/../webapp.py", "videos/.clip.mp4", "elsewhere/clip.mp4",
                    "videos/missing.mp4", ""]:
-        res = client.get("/api/frame", query_string={"source": source})
+        res = client.get("/api/info", query_string={"source": source})
         assert res.status_code == 404, source
     assert client.get("/media/videos/..%2Fwebapp.py").status_code == 404
 
@@ -161,10 +94,14 @@ def test_render_runs_timeslice():
     assert client.get(f"/media/renders/{names[0]}").status_code == 200
 
 
+# At half size, as the live view and a preview render hold it, the clip is 30
+# frames at 10 fps, 32 pixels wide.
+
 def test_render_with_noise_makes_what_the_live_view_shows():
     options = dict(angle=30, inside=1, noise=4, noise_direction="perpendicular",
                    noise_seed=2)
-    _, info, _ = frame(**options)
+    noise = timeslice.Noise(4, direction="perpendicular", seed=2).scaled(0.5)
+    sweep = timeslice.plan_sweep(30, 32, "rotate", 30, inside=True, noise=noise)
     res = client.post("/api/render", json={"source": "videos/clip.mp4", "preview": True,
                                            **options})
     assert res.get_json()["state"] == "running"
@@ -177,13 +114,15 @@ def test_render_with_noise_makes_what_the_live_view_shows():
          "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0",
          str(webapp.folders["renders"] / job["output"])],
         capture_output=True, text=True, check=True).stdout
-    assert int(frames) == info["frames"]
+    assert int(frames) == sweep.frames
 
 
 def test_render_of_a_loop_makes_what_the_live_view_shows():
     options = dict(angle=60, loop=1, loop_fade=0.4, loop_sides=1, motion="perpendicular",
                    loop_side_fade=6)
-    _, info, _ = frame(**options)
+    # The fades take 4 frames and 3 columns.
+    sweep = timeslice.plan_sweep(26, 29, "rotate", 60, motion="perpendicular", loop=True,
+                                 sides=True)
     res = client.post("/api/render", json={"source": "videos/clip.mp4", "preview": True,
                                            **options})
     assert res.get_json()["state"] == "running"
@@ -197,7 +136,7 @@ def test_render_of_a_loop_makes_what_the_live_view_shows():
          str(webapp.folders["renders"] / job["output"])],
         capture_output=True, text=True, check=True).stdout.strip()
     width, frames = probe.split(",")
-    assert int(frames) == info["frames"] and int(width) == info["width"] + info["width"] % 2
+    assert int(frames) == sweep.frames and int(width) == sweep.width + sweep.width % 2
 
 
 if __name__ == "__main__":
