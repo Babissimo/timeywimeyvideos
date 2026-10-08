@@ -542,7 +542,8 @@ def sample_noisy_columns(volume, t, x, push, noise, f, nearest=False, wrap=False
 # every column of output frame f, for use with sample_columns, the (t, x)
 # normal of the frame's plane, which perpendicular noise pushes along, and
 # whether it loops. A loop runs round time in a ring, so at(f) can lie past
-# either end of the clip, and is read with wrap.
+# either end of the clip, and is read with wrap. With sides, x wraps round too
+# (wrap_x).
 #
 # Given noise, a plan allows for it pushing points as far as it can: the
 # whole-plane sweep starts and ends early and late enough to catch the bumps,
@@ -555,6 +556,7 @@ class Sweep(NamedTuple):
     at: Callable[[int], tuple]
     normal: tuple
     loop: bool = False
+    sides: bool = False
 
 
 def _push(noise, normal):
@@ -591,6 +593,30 @@ def _too_long(angle, width, span_t, push_t, n_frames, kind=""):
             f"only {n_frames}.")
 
 
+LOOP_TOLERANCE = 2.0  # degrees a loop round the sides may stray from its aim
+LOOP_WINDINGS = 16    # most times across the width, or round time, it tries
+
+
+@functools.lru_cache(maxsize=64)  # the live view plans a sweep for every frame
+def _windings(width, n_frames, dx, dt):
+    """How many times (a, b) a loop through a clip whose sides and ends wrap
+    round should go across the width and round time, to close up while moving
+    about along (dx, dt): the shortest within LOOP_TOLERANCE degrees of it, or
+    failing that the closest."""
+    aim = math.atan2(dt, dx)
+    best = None
+    for a in range(-LOOP_WINDINGS, LOOP_WINDINGS + 1):
+        for b in range(-LOOP_WINDINGS, LOOP_WINDINGS + 1):
+            if math.gcd(a, b) != 1:  # not a closed path, or one gone round twice
+                continue
+            off = abs(math.remainder(math.atan2(b * n_frames, a * width) - aim, math.tau))
+            length = math.hypot(a * width, b * n_frames)
+            key = (0, length) if math.degrees(off) <= LOOP_TOLERANCE else (1, off)
+            if best is None or key < best[0]:
+                best = key, (a, b)
+    return best[1]
+
+
 def _pushed_sideways(angle, push_x):
     return (f"At {angle:g} degrees the noise can push the ends of the frame "
             f"{abs(push_x):.3g} pixels sideways, out of the video.")
@@ -614,7 +640,7 @@ def _rotation_room(n_frames, width, angle, noise=None):
 
 
 def rotation_sweep(n_frames, width, angle, inside=False, motion=None,
-                   noise=None, loop=False):
+                   noise=None, loop=False, sides=False):
     """Plan a sweep with the slicing plane rotated `angle` degrees about y.
 
     Without `inside`, the frame is wide enough to hold the plane's whole cut
@@ -633,8 +659,16 @@ def rotation_sweep(n_frames, width, angle, inside=False, motion=None,
     first. It stays inside the video, so `inside` makes no difference, and no
     clip is too short.
 
+    With `sides` as well, x wraps round too, the picture's left edge following
+    its right, so the frame can also move "perpendicular" to itself. It then
+    goes across the width and round time each a whole number of times, along
+    the shortest such path within LOOP_TOLERANCE degrees of perpendicular, and
+    no noise can take it out of the video.
+
     With `noise`, the sweep allows for the noise pushing points off the plane.
     """
+    if sides and not loop:
+        raise ValueError("the sides only wrap round on a loop")
     c, s = _rotation(angle)
     normal = (c, -s)  # (t, x): the way the whole plane sweeps
     push_t, push_x = _push(noise, normal)
@@ -643,13 +677,21 @@ def rotation_sweep(n_frames, width, angle, inside=False, motion=None,
     sign_t = 1 if c >= 0 else -1
 
     if loop:
-        if motion not in (None, "time"):
-            raise ValueError("a loop can only move straight through time")
-        if _rotation_room(n_frames, width, angle, noise)[1] < 0:
+        if motion not in (None, "time") and not (sides and motion == "perpendicular"):
+            raise ValueError("a loop moves straight through time, or with the "
+                             "sides wrapping, perpendicular to the frame")
+        if not sides and _rotation_room(n_frames, width, angle, noise)[1] < 0:
             raise DoesNotFit(_pushed_sideways(angle, push_x) + " " + _angles_that_fit(
                 lambda a: _rotation_room(n_frames, width, a, noise)[1] >= 0, 90))
-        out_width, out_frames = width, n_frames
-        dx, dt = 0.0, sign_t
+        out_width = width
+        if motion == "perpendicular":
+            across, round_t = _windings(width, n_frames, -s, c)
+            span_x, span_t = across * width, round_t * n_frames
+            out_frames = max(1, round(math.hypot(span_x, span_t)))  # about a pixel a frame
+            dx, dt = span_x / out_frames, span_t / out_frames
+        else:
+            out_frames = n_frames
+            dx, dt = 0.0, sign_t
     elif not inside:
         ahead = abs(push_t * c - push_x * s)  # how far bumps reach off the plane
         out_width = max(1, round(width * abs(c) + n_frames * abs(s)))
@@ -693,7 +735,7 @@ def rotation_sweep(n_frames, width, angle, inside=False, motion=None,
         step = f - (out_frames - 1) / 2  # distance moved from the centre
         return centre_t + step * dt + across * s, centre_x + step * dx + across * c
 
-    return Sweep(out_width, out_frames, at, normal, loop)
+    return Sweep(out_width, out_frames, at, normal, loop, sides)
 
 
 def _shear(angle):
@@ -713,7 +755,8 @@ def _shear_room(n_frames, width, angle, noise=None):
     return n_frames - 1 - abs(k) * (width - 1) - 2 * abs(push_t), -abs(push_x)
 
 
-def shear_sweep(n_frames, width, angle, inside=False, noise=None, loop=False):
+def shear_sweep(n_frames, width, angle, inside=False, noise=None, loop=False,
+                sides=False):
     """Plan a sweep where output column x is input column x, delayed in time
     by tan(angle) frames per pixel across the frame.
 
@@ -724,11 +767,15 @@ def shear_sweep(n_frames, width, angle, inside=False, noise=None, loop=False):
     DoesNotFit if the clip is too short for the angle. With `loop`, time runs
     round in a ring, the clip's first frame following its last, and the frame
     goes once round it, so the last output frame leads back into the first.
+    With `sides` as well, x wraps round too, the picture's left edge following
+    its right.
 
     With `noise`, the sweep allows for the noise pushing points off the plane.
     Perpendicular noise pushes the frame's ends sideways, so with `inside` or
-    `loop` it only fits at 0 degrees.
+    `loop` it only fits at 0 degrees, unless the sides wrap.
     """
+    if sides and not loop:
+        raise ValueError("the sides only wrap round on a loop")
     if not -90 < angle < 90:
         raise ValueError("shear needs an angle between -90 and 90 degrees "
                          "(at 90 the delay would be infinite)")
@@ -740,7 +787,7 @@ def shear_sweep(n_frames, width, angle, inside=False, noise=None, loop=False):
 
     if inside or loop:
         room_t, room_x = _shear_room(n_frames, width, angle, noise)
-        if room_x < 0:
+        if room_x < 0 and not sides:
             raise DoesNotFit(
                 f"At {angle:g} degrees perpendicular noise can push the ends of "
                 f"a sheared frame {abs(push_x):.3g} pixels sideways, out of the "
@@ -760,17 +807,18 @@ def shear_sweep(n_frames, width, angle, inside=False, noise=None, loop=False):
     def at(f):
         return centre_t + (f - (out_frames - 1) / 2) + delay, x
 
-    return Sweep(width, out_frames, at, normal, loop)
+    return Sweep(width, out_frames, at, normal, loop, sides)
 
 
 def plan_sweep(n_frames, width, slice="rotate", angle=45.0, inside=False,
-               motion=None, noise=None, loop=False):
+               motion=None, noise=None, loop=False, sides=False):
     """Plan a sweep of either kind. motion only applies to rotate, with
     inside or loop."""
     if slice == "shear":
-        return shear_sweep(n_frames, width, angle, inside, noise, loop)
+        return shear_sweep(n_frames, width, angle, inside, noise, loop, sides)
     if slice == "rotate":
-        return rotation_sweep(n_frames, width, angle, inside, motion, noise, loop)
+        return rotation_sweep(n_frames, width, angle, inside, motion, noise, loop,
+                              sides)
     raise ValueError(f"unknown slice {slice!r}")
 
 
@@ -782,8 +830,8 @@ def _looping(noise, sweep):
 def surface(sweep, f, height, noise):
     """The (t, y, x) source position of every pixel of output frame f, with
     the frame pushed off its plane by the noise, as arrays that broadcast to
-    (height, sweep.width) for sample(), with wrap if the sweep loops. Use the
-    noise the sweep was planned with."""
+    (height, sweep.width) for sample(), with wrap if the sweep loops and
+    wrap_x if its sides do too. Use the noise the sweep was planned with."""
     noise = _looping(noise, sweep)
     t, x = sweep.at(f)
     bump = noise.field(sweep.width, height, f)
@@ -796,10 +844,10 @@ def slice_frame(volume, sweep, f, noise=None, nearest=False):
     plane by the noise the sweep was planned with, if any."""
     t, x = sweep.at(f)
     if noise is None:
-        return sample_columns(volume, t, x, nearest, sweep.loop)
+        return sample_columns(volume, t, x, nearest, sweep.loop, sweep.sides)
     noise = _looping(noise, sweep)
     return sample_noisy_columns(volume, t, x, noise.push(sweep.normal), noise, f,
-                                nearest, sweep.loop)
+                                nearest, sweep.loop, sweep.sides)
 
 
 def main():
@@ -820,7 +868,8 @@ def main():
                              "inside the video, so there are no black edges")
     parser.add_argument("--motion", choices=["perpendicular", "time", "longest"],
                         help="with --slice rotate --inside: the straight line "
-                             "the frame moves along (default longest)")
+                             "the frame moves along (default longest). With "
+                             "--loop-sides: time (default) or perpendicular")
     parser.add_argument("--loop", action="store_true",
                         help="make a seamless loop: time runs round in a ring, "
                              "the first frame following the last, and a frame "
@@ -829,6 +878,10 @@ def main():
                         help="with --loop: blend the clip's last S seconds into "
                              "its first, so the join from its end back to its "
                              "start doesn't show (default 0)")
+    parser.add_argument("--loop-sides", action="store_true",
+                        help="with --loop: let the picture's sides wrap round "
+                             "too, its left edge following its right, so the "
+                             "frame can move sideways (--motion perpendicular)")
     parser.add_argument("--noise", type=float, default=0.0, metavar="A",
                         help="push each point of the slicing surface up to A "
                              "frames off the plane with Perlin noise (default "
@@ -862,15 +915,23 @@ def main():
         parser.error("--motion doesn't apply to --slice shear: a sheared frame "
                      "always uses every input column, so it can only move "
                      "through time")
-    if args.loop and (args.inside or args.motion):
-        parser.error("--inside and --motion don't apply to --loop: a looping "
-                     "frame always stays inside the video and moves straight "
+    if args.loop and args.inside:
+        parser.error("--inside doesn't apply to --loop: a looping frame always "
+                     "stays inside the video")
+    if args.loop_sides and not args.loop:
+        parser.error("--loop-sides needs --loop")
+    if args.loop and args.motion and not args.loop_sides:
+        parser.error("--motion needs --loop-sides on a loop: unless the sides "
+                     "wrap round, a looping frame can only move straight "
                      "through time")
+    if args.loop_sides and args.motion == "longest":
+        parser.error("--motion longest doesn't apply to --loop-sides: with the "
+                     "sides wrapping round, no straight line is the longest")
     if args.loop_fade is not None and not args.loop:
         parser.error("--loop-fade needs --loop")
     if (args.loop_fade or 0) < 0:
         parser.error("--loop-fade can't be negative")
-    if args.motion and not args.inside:
+    if args.motion and not (args.inside or args.loop):
         parser.error("--motion needs --inside: without it the frame already "
                      "holds the plane's whole cut through the video, so moving "
                      "it another way would only change the speed")
@@ -909,10 +970,11 @@ def main():
 
     try:
         sweep = plan_sweep(n_frames, width, args.slice, args.angle, args.inside,
-                           args.motion, noise, args.loop)
+                           args.motion, noise, args.loop, args.loop_sides)
     except DoesNotFit as err:
         if args.loop:  # only sideways noise can leave a loop's frame
-            sys.exit(f"{err}\nUse less --noise, or --noise-direction time.")
+            sys.exit(f"{err}\nUse less --noise, --noise-direction time, or "
+                     f"--loop-sides.")
         smaller = "a smaller angle or less --noise" if noise else "a smaller angle"
         sys.exit(f"{err}\nUse a longer clip or {smaller}, or drop --inside "
                  f"to sweep the whole plane with black edges.")

@@ -508,7 +508,71 @@ def test_a_loop_only_takes_perpendicular_noise_that_keeps_inside():
 
 def test_a_loop_only_moves_through_time():
     raises(ValueError, timeslice.rotation_sweep, T, W, 30, motion="longest", loop=True)
+    raises(ValueError, timeslice.rotation_sweep, T, W, 30, motion="perpendicular",
+           loop=True)
     assert loop("rotate", 30, motion="time").frames == T
+
+
+# Loops round the sides too.
+
+def test_a_loop_round_the_sides_at_ninety_degrees_crosses_every_column():
+    # Upright frames, each the y-t slice of one column, moving right to left
+    # across all of them: column j of frame f is column 10 - f at time j - 2.
+    frames = frames_of(volume, loop("rotate", 90, motion="perpendicular", sides=True))
+    assert len(frames) == W
+    for f in range(W):
+        for j in range(W):
+            assert np.array_equal(frames[f, :, j], volume[(j - 2) % T, :, W - 1 - f])
+
+
+def test_a_loop_round_the_sides_moves_about_perpendicular_and_closes():
+    noise = Noise(2.5, size=3.0, speed=0.6, direction="perpendicular", seed=1)
+    for angle in [0, 20, 45, 70, 80, 90, 135, -60]:
+        sweep = loop("rotate", angle, motion="perpendicular", sides=True, noise=noise)
+        assert sweep.sides and sweep.width == W
+        (t0, x0), (t1, x1) = sweep.at(0), sweep.at(1)
+        step_t, step_x = t1[0] - t0[0], x1[0] - x0[0]
+        assert 0.9 < math.hypot(step_t, step_x) < 1.1  # about a pixel a frame
+        c, s = timeslice._rotation(angle)
+        along = (step_t * c - step_x * s) / math.hypot(step_t, step_x)
+        off = math.degrees(math.acos(min(1.0, along)))
+        assert off <= timeslice.LOOP_TOLERANCE, (angle, off)
+        # After the last frame it has gone a whole number of times across the
+        # width and round time, so the next frame is the first again.
+        t_end, x_end = sweep.at(sweep.frames)
+        assert np.allclose((t_end - t0) / T, round((t_end - t0)[0] / T))
+        assert np.allclose((x_end - x0) / W, round((x_end - x0)[0] / W))
+        for bumps in [None, noise]:
+            first = timeslice.slice_frame(volume, sweep, 0, bumps).astype(int)
+            after = timeslice.slice_frame(volume, sweep, sweep.frames, bumps).astype(int)
+            assert np.abs(after - first).max() <= 1, (angle, bumps)
+
+
+def test_a_loop_round_the_sides_takes_the_closest_path_when_none_is_close_enough():
+    # A wide, short clip at 3 degrees would need over a thousand turns round
+    # time per turn across to stay within the tolerance, so it goes straight
+    # through time instead, 3 degrees off.
+    aim = timeslice._rotation(3)
+    assert timeslice._windings(1920, 30, -aim[1], aim[0]) == (0, 1)
+
+
+def test_noise_cannot_push_a_loop_round_the_sides_out_of_the_video():
+    sideways = Noise(1.0, size=2.0, direction="perpendicular")
+    for sweep in [timeslice.rotation_sweep(13, 5, 20, noise=sideways, loop=True, sides=True),
+                  timeslice.shear_sweep(13, 5, 20, noise=sideways, loop=True, sides=True)]:
+        assert sweep.frames == 13
+        for f in range(sweep.frames):
+            t, y, x = timeslice.surface(sweep, f, 3, sideways)
+            assert np.array_equal(
+                timeslice.slice_frame(long_volume, sweep, f, sideways),
+                timeslice.sample(long_volume, t, y, x, wrap=True, wrap_x=True))
+
+
+def test_sides_only_wrap_on_a_loop_and_never_take_the_longest_line():
+    raises(ValueError, timeslice.rotation_sweep, T, W, 30, sides=True)
+    raises(ValueError, timeslice.shear_sweep, T, W, 30, inside=True, sides=True)
+    raises(ValueError, timeslice.rotation_sweep, T, W, 30, motion="longest", loop=True,
+           sides=True)
 
 
 def test_crossfade_spreads_the_join_round_the_loop():
