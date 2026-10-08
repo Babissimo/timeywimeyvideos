@@ -59,6 +59,39 @@
     </section>
 
     <section class="card">
+      <h2>Surface noise</h2>
+      <label class="check first">
+        <input type="checkbox" id="noise">
+        <span>Perlin noise on the surface<br><span class="note">Pushes each point of
+          the frame off the flat plane, in bumps that change as it sweeps</span></span>
+      </label>
+
+      <div id="noise-fields" hidden>
+        <div class="field">
+          <label for="noise-amount">Amplitude (frames)</label>
+          <div class="angle">
+            <input type="range" id="noise-range" min="0" max="60" step="0.5" value="10" aria-label="Amplitude">
+            <input type="number" id="noise-amount" min="0" step="0.5" value="10">
+          </div>
+        </div>
+        <div class="pair spaced">
+          <div class="field"><label for="noise-size">Size (px)</label>
+            <input type="number" id="noise-size" min="1" step="1" value="64"></div>
+          <div class="field"><label for="noise-speed">Speed (px/frame)</label>
+            <input type="number" id="noise-speed" step="0.1" value="1"></div>
+          <div class="field"><label for="noise-direction">Push</label>
+            <select id="noise-direction">
+              <option value="time">Through time</option>
+              <option value="perpendicular">Perpendicular</option>
+            </select></div>
+          <div class="field"><label for="noise-seed">Seed</label>
+            <input type="number" id="noise-seed" min="0" step="1" value="0"></div>
+        </div>
+        <p class="note" id="noise-note"></p>
+      </div>
+    </section>
+
+    <section class="card">
       <h2>Render</h2>
       <p class="note" id="estimate"></p>
       <div class="buttons">
@@ -124,6 +157,7 @@
       <div class="stage"><canvas id="cube"></canvas></div>
       <p class="note">Drag to turn, scroll to zoom. The first frame is at the front
         and time runs back; the shaded strip on top is the region the slice sweeps.</p>
+      <p class="note" id="cube-noise" hidden></p>
     </section>
 
     <section class="card wide">

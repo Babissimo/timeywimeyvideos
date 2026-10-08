@@ -49,6 +49,20 @@ def test_live_frames_match_a_preview_render():
     assert np.array_equal(image, timeslice.sample_columns(volume, *sweep.at(f), nearest=True))
 
 
+def test_live_frames_with_noise_match_a_preview_render():
+    volume, _ = timeslice.load_video(str(clip), 0.5, 0.5, fast=True)
+    noise = timeslice.Noise(3, size=10, speed=0.5, direction="perpendicular", seed=4)
+    _, info, image = frame(angle=30, pos=0.25, noise=3, noise_size=10, noise_speed=0.5,
+                           noise_direction="perpendicular", noise_seed=4)
+    half = noise.scaled(0.5)
+    sweep = timeslice.plan_sweep(len(volume), volume.shape[2], "rotate", 30, noise=half)
+    f = round(0.25 * (sweep.frames - 1))
+    assert info["frame"] == f and info["frames"] == sweep.frames
+    assert np.array_equal(image, timeslice.slice_frame(volume, sweep, f, half, nearest=True))
+    full = timeslice.plan_sweep(60, 64, "rotate", 30, noise=noise)
+    assert info["full"]["frames"] == full.frames
+
+
 def test_frame_reports_full_size_render():
     _, info, _ = frame(angle=20, slice="shear")
     assert info["full"]["width"] == 64 and info["full"]["height"] == 48
@@ -67,6 +81,11 @@ def test_bad_options_are_refused():
     assert frame(slice="twist")[0].status_code == 400
     assert frame(scale=0)[0].status_code == 400
     assert frame(fps="-3")[0].status_code == 400
+    assert frame(noise=-1)[0].status_code == 400
+    assert frame(noise=2, noise_size=0)[0].status_code == 400
+    assert frame(noise=2, noise_direction="sideways")[0].status_code == 400
+    assert frame(noise=2, noise_seed="1.5")[0].status_code == 400
+    assert frame(noise=2, noise_seed=-1)[0].status_code == 400
 
 
 def test_only_serves_files_in_its_folders():
@@ -86,21 +105,45 @@ def test_upload_adds_a_source():
     assert res.status_code == 400
 
 
+def finish_render():
+    for _ in range(600):
+        job = client.get("/api/render").get_json()
+        if job["state"] != "running":
+            return job
+        time.sleep(0.1)
+    raise AssertionError("the render took more than a minute")
+
+
 def test_render_runs_timeslice():
     res = client.post("/api/render", json={"source": "videos/clip.mp4", "angle": 30,
                                            "preview": True})
     assert res.get_json()["state"] == "running"
     assert client.post("/api/render", json={"source": "videos/clip.mp4"}).status_code == 409
-    for _ in range(600):
-        job = client.get("/api/render").get_json()
-        if job["state"] != "running":
-            break
-        time.sleep(0.1)
+    job = finish_render()
     assert job["state"] == "done", job
     assert job["output"] == "clip_rotate_30deg_preview.mp4"
     names = [r["name"] for r in client.get("/api/renders").get_json()]
     assert names == ["clip_rotate_30deg_preview.mp4"]
     assert client.get(f"/media/renders/{names[0]}").status_code == 200
+
+
+def test_render_with_noise_makes_what_the_live_view_shows():
+    options = dict(angle=30, inside=1, noise=4, noise_direction="perpendicular",
+                   noise_seed=2)
+    _, info, _ = frame(**options)
+    res = client.post("/api/render", json={"source": "videos/clip.mp4", "preview": True,
+                                           **options})
+    assert res.get_json()["state"] == "running"
+    job = finish_render()
+    assert job["state"] == "done", job
+    assert job["output"] == \
+        "clip_rotate_30deg_inside_noise4_noiseperpendicular_noiseseed2_preview.mp4"
+    frames = subprocess.run(
+        ["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
+         "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0",
+         str(webapp.folders["renders"] / job["output"])],
+        capture_output=True, text=True, check=True).stdout
+    assert int(frames) == info["frames"]
 
 
 if __name__ == "__main__":

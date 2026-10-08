@@ -160,6 +160,204 @@ def test_general_sampler_blends_between_voxels():
     assert np.allclose(point[0, 0], expected, atol=0.5)
 
 
+def test_general_sampler_can_copy_the_nearest_voxel():
+    points = timeslice.sample(volume, [[2.4, 2.6]], [[1.6, 0.4]], [[3.6, 3.4]],
+                              nearest=True)
+    assert np.array_equal(points[0, 0], volume[2, 2, 4])
+    assert np.array_equal(points[0, 1], volume[3, 0, 3])
+
+
+# Surface noise.
+
+Noise = timeslice.Noise
+
+
+def test_noise_stays_within_its_amplitude():
+    for seed in range(4):
+        noise = Noise(1, size=4.3, speed=0.37, seed=seed)
+        values = np.stack([noise.field(200, 150, f) for f in range(10)])
+        assert np.abs(values).max() <= 1
+        assert np.abs(values).max() > 0.8  # and comes close to it
+
+
+def test_noise_is_smooth_and_set_by_its_seed():
+    bumps = Noise(1, size=8).field(64, 48, 3)
+    assert np.array_equal(bumps, Noise(1, size=8).field(64, 48, 3))
+    assert not np.allclose(bumps, Noise(1, size=8, seed=1).field(64, 48, 3))
+    assert np.abs(np.diff(bumps, axis=0)).max() < 0.3
+    assert np.abs(np.diff(bumps, axis=1)).max() < 0.3
+
+
+def test_noise_changes_over_the_sweep_unless_its_speed_is_zero():
+    still, moving = Noise(1, size=8, speed=0), Noise(1, size=8, speed=1)
+    assert np.array_equal(still.field(32, 24, 0), still.field(32, 24, 9))
+    assert not np.allclose(moving.field(32, 24, 0), moving.field(32, 24, 9))
+
+
+def test_preview_noise_is_the_full_noise_at_half_size():
+    # Sizes where both work the noise out at nodes, and where both work it
+    # out at every pixel.
+    for size in [64, 3]:
+        full = Noise(1, size=size, speed=0.75, seed=2)
+        half = full.scaled(0.5)
+        for f in [0, 3, 10]:
+            assert np.array_equal(half.field(80, 60, f),
+                                  full.field(160, 120, 2 * f)[::2, ::2]), size
+
+
+def exact_noise(noise, width, height, f):
+    """Perlin noise worked out at every pixel, from -1 to 1."""
+    out = np.empty((height, width))
+    timeslice._noise_grid(timeslice._permutation(noise.seed), np.arange(width) / noise.size,
+                          np.arange(height) / noise.size, f * noise.speed / noise.size, out)
+    return out / timeslice.NOISE_BOUND
+
+
+def test_noise_from_nodes_is_close_to_perlin_noise():
+    for seed in range(4):
+        noise = Noise(1, size=64, speed=0.37, seed=seed)
+        for f in [0, 5]:
+            error = np.abs(noise.field(640, 360, f) - exact_noise(noise, 640, 360, f))
+            assert error.max() < 0.01 and error.mean() < 0.001, (seed, f, error.max())
+
+
+def test_small_noise_is_worked_out_at_every_pixel():
+    # Bumps under 16 pixels apart would put nodes under 2 pixels apart.
+    for size in [3.0, 15.9]:
+        noise = Noise(1, size=size, speed=0.6, seed=1)
+        assert np.array_equal(noise.field(100, 80, 4), exact_noise(noise, 100, 80, 4))
+
+
+def test_zero_noise_gives_the_flat_slice():
+    flat = Noise(0)
+    for kind, angle in [("rotate", 30), ("shear", 20)]:
+        sweep = timeslice.plan_sweep(T, W, kind, angle, noise=flat)
+        for nearest in [False, True]:
+            bumpy = np.stack([timeslice.slice_frame(volume, sweep, f, flat, nearest)
+                              for f in range(sweep.frames)])
+            assert np.array_equal(bumpy, render(volume, sweep, nearest))
+
+
+def test_noisy_column_sampler_matches_general_sampler():
+    # Whole-plane sweeps, so some points fall outside the video too.
+    cases = [(kind, angle, direction, size)
+             for kind, angle in [("rotate", 30), ("rotate", 120), ("shear", 20)]
+             for direction in ["time", "perpendicular"]
+             for size in [3.0, 24.0]]  # noise at every pixel, and from nodes
+    for kind, angle, direction, size in cases:
+        noise = Noise(1.5, size=size, speed=0.6, direction=direction, seed=1)
+        sweep = timeslice.plan_sweep(T, W, kind, angle, noise=noise)
+        for f in range(sweep.frames):
+            t, x = sweep.at(f)
+            for nearest in [False, True]:
+                fast = timeslice.sample_noisy_columns(
+                    volume, t, x, noise.push(sweep.normal), noise, f, nearest)
+                slow = timeslice.sample(
+                    volume, *timeslice.surface(sweep, f, H, noise), nearest)
+                assert np.array_equal(fast, slow), (kind, angle, direction, f)
+
+
+def test_time_noise_reads_each_pixel_earlier_or_later():
+    # At 0 degrees pixel (y, x) of output frame f comes from frame f + 2 (the
+    # room the noise needs), plus the noise.
+    noise = Noise(2, size=3.0, speed=0.5)
+    n_frames, height, width = long_volume.shape[:3]
+    sweep = timeslice.rotation_sweep(n_frames, width, 0, inside=True, noise=noise)
+    assert sweep.frames == n_frames - 4
+    y, x = np.indices((height, width))
+    for f in range(sweep.frames):
+        t = f + 2 + 2 * noise.field(width, height, f)
+        expected = long_volume[np.floor(t + 0.5).astype(int), y, x]
+        assert np.array_equal(
+            timeslice.slice_frame(long_volume, sweep, f, noise, nearest=True), expected)
+
+
+def test_perpendicular_noise_pushes_straight_off_the_plane():
+    noise = Noise(1.5, direction="perpendicular")
+    sweeps = [timeslice.rotation_sweep(T, W, angle, noise=noise)
+              for angle in [0, 30, 90, 135]]
+    sweeps.append(timeslice.shear_sweep(T, W, 30, noise=noise))
+    for sweep in sweeps:
+        t, x = sweep.at(2)
+        push_t, push_x = noise.push(sweep.normal)
+        assert abs(push_t * (t[1] - t[0]) + push_x * (x[1] - x[0])) < 1e-9
+        assert math.isclose(math.hypot(push_t, push_x), 1.5)
+
+
+def test_noisy_inside_frames_never_leave_the_video():
+    n_frames, height, width = long_volume.shape[:3]
+    fitted = 0
+    for direction in ["time", "perpendicular"]:
+        noise = Noise(1.0, size=2.0, speed=0.7, direction=direction)
+        sweeps = [timeslice.shear_sweep(n_frames, width, 20, True, noise)] \
+            if direction == "time" else []
+        for angle in [0, 20, 60, 90, 135]:
+            for motion in ["perpendicular", "time", "longest"]:
+                try:
+                    sweeps.append(timeslice.rotation_sweep(
+                        n_frames, width, angle, True, motion, noise))
+                except timeslice.DoesNotFit:
+                    pass
+        for sweep in sweeps:
+            fitted += 1
+            # Even pushed as far as the noise could ever push them...
+            push_t, push_x = (abs(p) for p in noise.push(sweep.normal))
+            for f in range(sweep.frames):
+                t, x = sweep.at(f)
+                assert t.min() - push_t > -1e-9 and t.max() + push_t < n_frames - 1 + 1e-9
+                assert x.min() - push_x > -1e-9 and x.max() + push_x < width - 1 + 1e-9
+                t, _, x = timeslice.surface(sweep, f, height, noise)
+                assert t.min() > -1e-9 and t.max() < n_frames - 1 + 1e-9
+                assert x.min() > -1e-9 and x.max() < width - 1 + 1e-9
+    assert fitted >= 20
+
+
+def test_noise_makes_room_inside():
+    noise = Noise(2.0)
+    plain = timeslice.rotation_sweep(13, 5, 30, inside=True, motion="time")
+    bumpy = timeslice.rotation_sweep(13, 5, 30, inside=True, motion="time", noise=noise)
+    assert bumpy.frames == plain.frames - 4
+    plain = timeslice.shear_sweep(13, 5, 20, inside=True)
+    bumpy = timeslice.shear_sweep(13, 5, 20, inside=True, noise=noise)
+    assert bumpy.frames == plain.frames - 4
+
+
+def test_whole_plane_sweep_starts_early_enough_for_the_bumps():
+    noise = Noise(2.0, direction="perpendicular")
+    assert timeslice.rotation_sweep(T, W, 30, noise=noise).frames == \
+        timeslice.rotation_sweep(T, W, 30).frames + 4
+    assert timeslice.shear_sweep(T, W, 30, noise=Noise(2.0)).frames == \
+        timeslice.shear_sweep(T, W, 30).frames + 4
+
+
+def message(fn, *args, **kwargs):
+    try:
+        fn(*args, **kwargs)
+    except timeslice.DoesNotFit as err:
+        return str(err)
+    raise AssertionError("DoesNotFit not raised")
+
+
+def test_does_not_fit_says_which_angles_do():
+    # sin(36.8 degrees) * 10 pixels is just under the clip's 6 frames.
+    assert message(timeslice.rotation_sweep, T, W, 45, inside=True) \
+        .endswith("Angles up to 36.8 degrees fit this clip.")
+    # Perpendicular noise pushes the ends of a nearly flat frame sideways,
+    # out of the video, until the frame turns far enough to leave room.
+    sideways = Noise(1.0, direction="perpendicular")
+    text = message(timeslice.rotation_sweep, 13, 5, 20, inside=True, noise=sideways)
+    assert "sideways" in text and text.endswith("Angles of 0 and 53.2 to 90 degrees fit this clip.")
+    assert message(timeslice.rotation_sweep, 13, 5, 0, inside=True, noise=Noise(7)) \
+        .endswith("No angle fits this clip.")
+
+
+def test_sheared_inside_frames_only_take_perpendicular_noise_at_zero_degrees():
+    noise = Noise(1.0, direction="perpendicular")
+    assert "Push the noise through time" in message(
+        timeslice.shear_sweep, 13, 5, 20, inside=True, noise=noise)
+    assert timeslice.shear_sweep(13, 5, 0, inside=True, noise=noise).frames == 11
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):
