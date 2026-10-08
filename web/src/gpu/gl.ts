@@ -74,12 +74,57 @@ function layout(gl: WebGL2RenderingContext, internalFormat: GLenum): [GLenum, GL
   throw new Error(`no layout for internal format ${internalFormat}`);
 }
 
+/**
+ * Have uploads take pixels as they are: not flipped, premultiplied or colour-converted.
+ * These settings belong to the context, not to a texture.
+ */
+export function unpackAsIs(gl: WebGL2RenderingContext): void {
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+}
+
 /** Give a texture new contents, or with data null, new storage of that size. */
 export function fill(gl: WebGL2RenderingContext, texture: WebGLTexture, internalFormat: GLenum,
                      width: number, height: number, data: ArrayBufferView | null): void {
   const [format, type] = layout(gl, internalFormat);
   gl.bindTexture(gl.TEXTURE_2D, texture);
+  unpackAsIs(gl);
   gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, width, height, 0, format, type, data);
+}
+
+/** A data texture that keeps its storage while its size and format stay the same. */
+export class DataTexture {
+  readonly texture: WebGLTexture;
+  private readonly gl: WebGL2RenderingContext;
+  private width = 0;
+  private height = 0;
+  private format: GLenum = 0;
+
+  constructor(gl: WebGL2RenderingContext) {
+    this.gl = gl;
+    this.texture = dataTexture(gl);
+  }
+
+  /** Give it these contents, reallocating only for a new size or format. */
+  put(internalFormat: GLenum, width: number, height: number, data: ArrayBufferView): void {
+    const { gl } = this;
+    if (width !== this.width || height !== this.height || internalFormat !== this.format) {
+      fill(gl, this.texture, internalFormat, width, height, data);
+      this.width = width;
+      this.height = height;
+      this.format = internalFormat;
+      return;
+    }
+    const [format, type] = layout(gl, internalFormat);
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    unpackAsIs(gl);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, format, type, data);
+  }
+
+  dispose(): void {
+    this.gl.deleteTexture(this.texture);
+  }
 }
 
 /** Bind a texture to a unit. */

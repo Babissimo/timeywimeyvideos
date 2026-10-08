@@ -30,6 +30,24 @@ describe("Volume", () => {
     volume.dispose();
   });
 
+  test("takes an image's pixels as they are, whatever the unpack state", async () => {
+    const clip = clips.long;
+    const pixels = rgba(clip, 4);
+    pixels[3] = 128;  // a translucent pixel, which premultiplying would darken
+    const image = new ImageData(new Uint8ClampedArray(pixels), clip.width, clip.height);
+    const bitmap = await createImageBitmap(new ImageData(new Uint8ClampedArray(rgba(clip, 5)),
+                                                         clip.width, clip.height));
+    const volume = Volume.create(gl, 2, clip.height, clip.width);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    volume.upload(0, image);
+    volume.upload(1, bitmap);
+    bitmap.close();
+    expect(readFrame(gl, volume, 0)).toEqual(pixels);
+    expect(readFrame(gl, volume, 1)).toEqual(rgba(clip, 5));
+    volume.dispose();
+  });
+
   test("needs at least one voxel each way, a whole number of them", () => {
     for (const [frames, height, width] of [[0, 2, 2], [2, 0, 2], [2, 2, 0], [2, 1.5, 2]])
       expect(() => Volume.create(gl, frames, height, width)).toThrow(RangeError);
@@ -126,6 +144,8 @@ describe("crossfade matches timeslice.crossfade", () => {
   test("leaves no GL error, and uploads working as before", () => {
     const clip = clips.small;
     const volume = upload(gl, clip);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
     volume.crossfade(2, 0);
     expect(gl.getError()).toBe(gl.NO_ERROR);
     volume.upload(4, rgba(clip, 0));

@@ -1,5 +1,5 @@
 /** A clip held on the GPU as one RGBA8 TEXTURE_2D_ARRAY: texel (x, y, layer) is voxel (t, y, x). */
-import { bind, dataTexture, fill, framebuffer, program } from "./gl";
+import { bind, dataTexture, fill, framebuffer, program, unpackAsIs } from "./gl";
 import { COVER, CROSSFADE } from "./shaders";
 
 /** The clip needs more of the GPU than it can give. */
@@ -73,6 +73,7 @@ export class Volume {
   upload(t: number, pixels: Uint8Array | TexImageSource): void {
     const { gl, storedWidth: width, height } = this;
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.texture);
+    unpackAsIs(gl);  // a 3D upload of bytes even fails if flipped or premultiplied
     // Two calls, one for each of texSubImage3D's overloads.
     if (ArrayBuffer.isView(pixels))
       gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, t, width, height, 1, gl.RGBA,
@@ -138,6 +139,7 @@ export class Volume {
     gl.bindFramebuffer(gl.FRAMEBUFFER, target);
     gl.viewport(0, 0, texels, height);
     gl.bindVertexArray(vao);
+    unpackAsIs(gl);  // a 3D upload of bytes even fails if flipped or premultiplied
     gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 4 * texels);
     for (let layer = 0; layer < frames; layer++) {
       gl.uniform1i(shader.uniforms.layer, layer);

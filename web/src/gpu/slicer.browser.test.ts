@@ -148,6 +148,36 @@ describe("Slicer", () => {
     volume.dispose();
   });
 
+  test("has nothing to read or draw before it slices", () => {
+    const fresh = new Slicer(gl);
+    expect(() => fresh.read()).toThrow("nothing has been sliced yet");
+    expect(() => fresh.draw()).toThrow("nothing has been sliced yet");
+    fresh.dispose();
+  });
+
+  test("slices again after drawing, as the live view does every frame", () => {
+    const clip = clips.small;
+    const volume = upload(gl, clip);
+    canvas.width = clip.width;
+    canvas.height = clip.height;
+    const x = Float64Array.from({ length: clip.width }, (_, i) => i);
+    const c = sliceCases.find((c) => c.noisy && c.clip === clip)!;
+    const tally = new Tally();
+    for (const [i, frame] of c.frames.entries()) {
+      const t = i % clip.frames;
+      slicer.slice(volume, { t: new Float64Array(clip.width).fill(t), x }, { nearest: true });
+      expect(slicer.read()).toEqual(rgba(clip, t));
+      slicer.draw();
+      const options = { wrap: c.wrap, wrapX: c.wrapX, noise: frame.noise, nearest: true };
+      slicer.slice(volume, frame.columns, options);
+      tally.add(slicer.read(), frame.nearest);
+      slicer.draw();
+    }
+    expect(tally.pixelsIdentical / tally.pixels).toBeGreaterThanOrEqual(0.995);
+    expect(gl.getError()).toBe(gl.NO_ERROR);
+    volume.dispose();
+  });
+
   test("draws the last slice upright, leaving no GL error", () => {
     const clip = clips.small;
     const volume = upload(gl, clip);
