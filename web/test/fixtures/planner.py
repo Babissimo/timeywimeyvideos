@@ -1,20 +1,24 @@
-"""Reference values for web/src/pymath.ts, from Python.
+"""Reference values for web/src/pymath.ts and planner.ts, from Python.
 
 Run from the repository root:
 
     uv run python web/test/fixtures/planner.py
 
-It writes pymath.json beside this script.
+It writes pymath.json and planner.json beside this script.
 """
 
 import json
 import math
+import sys
 from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[2]))
+
+import timeslice  # noqa: E402
 
 
 def write(name, data):
@@ -99,5 +103,74 @@ def pymath():
     })
 
 
+ANGLES = [0, 30, -30, 45, 89.9, -89.9, 90, -90, 120, 135, 180, -180, 37.3, -61.7, 3]
+ROTATE_MODES = [{}] + [
+    {"inside": True, "motion": m} for m in [None, "perpendicular", "time", "longest", "sideways"]
+] + [{"loop": True}] + [{"loop": True, "sides": True, "motion": m} for m in [None, "perpendicular"]]
+SHEAR_MODES = [{}, {"inside": True}, {"loop": True}, {"loop": True, "sides": True}]
+# (sizes as (frames, width), angles, rotate modes, shear modes)
+GRID = [
+    ([(7, 11), (13, 5)], ANGLES, ROTATE_MODES, SHEAR_MODES),
+    ([(2, 5)], [0, 30, 80, 90, 180], ROTATE_MODES, SHEAR_MODES),
+    ([(300, 640), (151, 1920), (30, 1920)], [0, 30, 89.9, 90, 135, 180, 37.3, -61.7, 3],
+     ROTATE_MODES, SHEAR_MODES),
+]
+ONE_OFFS = [
+    (7, 11, {"slice": "twist", "angle": 30}),
+    (7, 11, {}),  # plan_sweep's defaults
+    (7, 11, {"slice": "rotate", "angle": 30, "motion": "sideways"}),  # not inside: ignored
+    (7, 11, {"slice": "rotate", "angle": 30, "sides": True}),
+    (7, 11, {"slice": "rotate", "angle": 30, "inside": True, "sides": True}),
+    (7, 11, {"slice": "rotate", "angle": 30, "loop": True, "motion": "time"}),
+    (7, 11, {"slice": "rotate", "angle": 30, "loop": True, "motion": "perpendicular"}),
+    (7, 11, {"slice": "rotate", "angle": 30, "loop": True, "motion": "longest"}),
+    (7, 11, {"slice": "rotate", "angle": 30, "loop": True, "motion": ""}),
+    (7, 11, {"slice": "rotate", "angle": 30, "loop": True, "sides": True, "motion": "time"}),
+    (7, 11, {"slice": "rotate", "angle": 30, "loop": True, "sides": True, "motion": "longest"}),
+    (13, 5, {"slice": "rotate", "angle": 30, "inside": True, "motion": ""}),
+    (13, 5, {"slice": "shear", "angle": 20, "motion": "longest"}),  # ignored
+    (13, 5, {"slice": "shear", "angle": 20, "sides": True}),
+    (13, 5, {"slice": "shear", "angle": 20, "inside": True, "loop": True}),
+]
+
+
+def sampled(n):
+    """The columns recorded of a frame n wide: the first, the last and a few between, a
+    multiple of 37 apart on a wide frame."""
+    step = 37 * math.ceil(n / 185) if n > 64 else math.ceil(n / 4)
+    return sorted(set(range(0, n, step)) | {n - 1})
+
+
+def plan(n_frames, width, options):
+    """A plan_sweep call and what it gives: its error, or the sweep with at(f) at a few f."""
+    case = {"nFrames": n_frames, "width": width, "options": options}
+    try:
+        sweep = timeslice.plan_sweep(n_frames, width, **options)
+    except ValueError as err:
+        return {**case, "error": {"type": type(err).__name__, "message": str(err)}}
+    cols = sampled(sweep.width)
+    at = []
+    for f in sorted({0, 1, sweep.frames // 2, sweep.frames - 1} & set(range(sweep.frames))):
+        t, x = sweep.at(f)
+        at.append([f, [float(t[j]) for j in cols], [float(x[j]) for j in cols]])
+    return {**case, "sweep": {"width": sweep.width, "frames": sweep.frames,
+                              "normal": [float(v) for v in sweep.normal], "loop": sweep.loop,
+                              "sides": sweep.sides, "cols": cols, "at": at}}
+
+
+def planner():
+    cases = []
+    for sizes, angles, rotate_modes, shear_modes in GRID:
+        for n_frames, width in sizes:
+            for angle in angles:
+                for kind, modes in [("rotate", rotate_modes), ("shear", shear_modes)]:
+                    for mode in modes:
+                        options = {"slice": kind, "angle": angle, **mode}
+                        cases.append(plan(n_frames, width, options))
+    cases += [plan(n_frames, width, options) for n_frames, width, options in ONE_OFFS]
+    write("planner.json", {"sweeps": cases})
+
+
 if __name__ == "__main__":
     pymath()
+    planner()
