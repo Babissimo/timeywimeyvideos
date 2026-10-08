@@ -224,9 +224,42 @@ def _read_in_row(volume, tt, row, xx, nearest, out, j):
 
 @njit(parallel=True, cache=True)
 def _sample_columns(volume, t, x, nearest, out):
-    for row in prange(volume.shape[1]):
-        for j in range(t.shape[0]):
-            _read_in_row(volume, t[j], row, x[j], nearest, out, j)
+    n_t, n_y, n_x, n_c = volume.shape
+    n = t.shape[0]
+    # Every row of output column j reads the same source columns with the same
+    # weights, so work those out once per column rather than once per pixel.
+    inside = np.empty(n, np.bool_)
+    t0s, t1s = np.empty(n, np.int64), np.empty(n, np.int64)
+    x0s, x1s = np.empty(n, np.int64), np.empty(n, np.int64)
+    fts, fxs = np.empty(n), np.empty(n)
+    for j in range(n):
+        inside[j] = -0.5 <= t[j] < n_t - 0.5 and -0.5 <= x[j] < n_x - 0.5
+        if inside[j]:
+            t0s[j], t1s[j], fts[j] = _neighbours(t[j], n_t)
+            x0s[j], x1s[j], fxs[j] = _neighbours(x[j], n_x)
+            if nearest:  # keep only the closest voxel, in t0s and x0s
+                if fts[j] >= 0.5:
+                    t0s[j] = t1s[j]
+                if fxs[j] >= 0.5:
+                    x0s[j] = x1s[j]
+
+    for row in prange(n_y):
+        for j in range(n):
+            if not inside[j]:
+                for c in range(n_c):
+                    out[row, j, c] = 0
+                continue
+            t0, t1, ft = t0s[j], t1s[j], fts[j]
+            x0, x1, fx = x0s[j], x1s[j], fxs[j]
+            if nearest:
+                for c in range(n_c):
+                    out[row, j, c] = volume[t0, row, x0, c]
+                continue
+            for c in range(n_c):
+                # Blend along x, then t: 4 voxels in all.
+                v = ((volume[t0, row, x0, c] * (1 - fx) + volume[t0, row, x1, c] * fx) * (1 - ft)
+                     + (volume[t1, row, x0, c] * (1 - fx) + volume[t1, row, x1, c] * fx) * ft)
+                out[row, j, c] = min(255, int(v + 0.5))
 
 
 def sample(volume, t, y, x, nearest=False):
