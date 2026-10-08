@@ -75,6 +75,10 @@ async function problem(promise: Promise<unknown>): Promise<{ message: string; ki
   return { message, kind };
 }
 
+/** The GPU memory a clip this size takes in YUV 4:2:0. */
+const yuvBytes = ([frames, height, width]: [number, number, number]) =>
+  frames * (height * width + 2 * Math.ceil(height / 2) * Math.ceil(width / 2));
+
 const close = (got: number[], expected: number[]) =>
   got.forEach((v, i) => expect(Math.abs(v - expected[i]))
     .toBeLessThanOrEqual(1e-9 * Math.max(1, Math.abs(expected[i]))));
@@ -95,7 +99,7 @@ describe("shows the frames timeslice --preview makes", () => {
       close(info.line, c.line);
       close(info.first, c.first);
       close(info.last, c.last);
-      expect(info.memory).toBeGreaterThanOrEqual(4 * c.volume[0] * c.volume[1] * c.volume[2]);
+      expect(info.memory).toBeGreaterThanOrEqual(yuvBytes(c.volume));  // more before fades
       expect(info.full).toEqual(fullSize(await probe(await clip()), readOptions(c.values)));
 
       // The browser decodes a little differently from ffmpeg, so frames match closely but
@@ -217,6 +221,15 @@ describe("Live", () => {
     expect((await live.show(SOURCE, values, 0.5)).volume).toEqual([20, 24, 32]);
     expect((await live.show("videos/h264-rot90.mp4", values, 0.5)).volume)
       .toEqual([20, 32, 24]);
+    live.dispose();
+  });
+
+  test("holds the clip in YUV 4:2:0, 1.5 bytes a voxel", async () => {
+    const { live } = make();
+    const info = await live.show(SOURCE, {}, 0);
+    expect(info.volume).toEqual([20, 24, 32]);
+    expect(info.memory).toBe(yuvBytes(info.volume));
+    expect(info.memory / (20 * 24 * 32)).toBe(1.5);
     live.dispose();
   });
 
