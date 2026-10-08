@@ -1,0 +1,18 @@
+[project]
+name = "timeywimeyvideos"
+version = "0.1.0"
+description = "Play a video back by sweeping a tilted plane through its space-time cuboid"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "flask>=3.0",
+    "numba>=0.59",
+    # numba 0.63 on has no Intel Mac wheels, and llvmlite will not build from source there
+    "numba<0.63; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "numpy>=1.20",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
