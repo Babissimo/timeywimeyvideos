@@ -1,4 +1,4 @@
-"""What webapp.read_options makes of the page's options, for web/src/options.test.ts.
+"""What page_options.read_options makes of the page's options, for web/src/options.test.ts.
 
 Run from the repository root:
 
@@ -16,7 +16,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[2]))
 
-import webapp  # noqa: E402
+import page_options  # noqa: E402
 
 CASES = [
     {},
@@ -100,8 +100,9 @@ def main():
     cases = []
     for values in CASES:
         try:
-            cases.append(dict(values=values, options=described(webapp.read_options(values))))
-        except webapp.Problem as err:
+            cases.append(dict(values=values,
+                              options=described(page_options.read_options(values))))
+        except page_options.Problem as err:
             cases.append(dict(values=values, error=str(err), kind=err.kind))
     text = json.dumps(cases, allow_nan=False, separators=(",", ":"))
     (HERE / "options.json").write_text(text + "\n")

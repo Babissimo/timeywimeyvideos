@@ -33,7 +33,7 @@ ROOT = HERE.parents[2]
 sys.path.insert(0, str(ROOT))
 
 import timeslice  # noqa: E402
-import webapp  # noqa: E402
+import page_options  # noqa: E402
 
 COLS, ROWS = 8, 6
 
@@ -138,7 +138,7 @@ RENDERS = [
 def names():
     cases = []
     for name, values in NAMES:
-        opts = webapp.read_options(values)
+        opts = page_options.read_options(values)
         for preview in (False, True):
             output = output_name(name, opts, preview)
             cmd = command(name, output, opts, preview)
@@ -170,7 +170,7 @@ def thumbnails(path, width, height, frames):
 
 
 def render(clip, values, preview, folder):
-    opts = webapp.read_options(values)
+    opts = page_options.read_options(values)
     output = output_name(clip, opts, preview)
     flags = command(clip, output, opts, preview)[5:]
     path = folder / output

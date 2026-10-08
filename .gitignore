@@ -10,7 +10,7 @@ __pycache__/
 !web/test/fixtures/**/*.mp4
 !web/test/fixtures/**/*.webm
 
-# web front end
+# local clips and renders
 videos/
 uploads/
 renders/
