@@ -192,11 +192,21 @@ and some combinations don't fit:
 - A sheared frame always spans the video's whole width, so with
   perpendicular noise and `--inside` it only fits at 0°.
 
+To save time, the noise is worked out at points `size`/8 pixels apart and
+blended smoothly between them (Catmull-Rom). That comes within half a
+percent of the amplitude of the exact Perlin noise, and still never moves a
+point further than A. For bumps under 16 pixels apart, where those points
+would be under 2 pixels apart, it's worked out at every pixel instead.
+
 Previews and the live view shrink A and the size with the clip, so they show
-the same bumps as the full render. Noise costs a little time: on a 4-core
-machine a 1080p frame took about 75–80 ms to slice and encode, against about
-70 ms flat. Slicing alone took about 37 ms against 18; most of the difference
-is working out the noise.
+the same bumps as the full render. (For bumps 16 to 32 pixels apart the full
+render uses those points but the half-size preview works the noise out at
+every pixel, so the two can differ by up to that half percent.)
+
+Noise costs little time: on a 4-core machine, slicing a 1080p frame took
+about 22 ms against 17 flat, and full renders, which spend most of their
+time encoding, took no measurably longer. Preview frames took about 5 ms
+against 4.4.
 
 ## Code layout
 
@@ -213,7 +223,8 @@ is working out the noise.
   normal of the frame's plane. Given noise, they make room for it.
 - `plan_sweep(...)` picks between them.
 - `Noise` is the surface noise: `field(...)` gives its values over a frame,
-  and `push(normal)` which way and how far they move a point.
+  blended from points `NOISE_STEPS` to every `size` pixels, and
+  `push(normal)` which way and how far they move a point.
 - `surface(...)` gives the (t, y, x) position of every pixel of a noisy
   frame, which `sample` can read.
 - `sample_noisy_columns(...)` is a faster way to read a noisy frame: it

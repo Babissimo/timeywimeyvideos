@@ -195,10 +195,37 @@ def test_noise_changes_over_the_sweep_unless_its_speed_is_zero():
 
 
 def test_preview_noise_is_the_full_noise_at_half_size():
-    full = Noise(1, size=16, speed=0.75, seed=2)
-    half = full.scaled(0.5)
-    for f in [0, 3, 10]:
-        assert np.array_equal(half.field(32, 24, f), full.field(64, 48, 2 * f)[::2, ::2])
+    # Sizes where both work the noise out at nodes, and where both work it
+    # out at every pixel.
+    for size in [64, 3]:
+        full = Noise(1, size=size, speed=0.75, seed=2)
+        half = full.scaled(0.5)
+        for f in [0, 3, 10]:
+            assert np.array_equal(half.field(80, 60, f),
+                                  full.field(160, 120, 2 * f)[::2, ::2]), size
+
+
+def exact_noise(noise, width, height, f):
+    """Perlin noise worked out at every pixel, from -1 to 1."""
+    out = np.empty((height, width))
+    timeslice._noise_grid(timeslice._permutation(noise.seed), np.arange(width) / noise.size,
+                          np.arange(height) / noise.size, f * noise.speed / noise.size, out)
+    return out / timeslice.NOISE_BOUND
+
+
+def test_noise_from_nodes_is_close_to_perlin_noise():
+    for seed in range(4):
+        noise = Noise(1, size=64, speed=0.37, seed=seed)
+        for f in [0, 5]:
+            error = np.abs(noise.field(640, 360, f) - exact_noise(noise, 640, 360, f))
+            assert error.max() < 0.01 and error.mean() < 0.001, (seed, f, error.max())
+
+
+def test_small_noise_is_worked_out_at_every_pixel():
+    # Bumps under 16 pixels apart would put nodes under 2 pixels apart.
+    for size in [3.0, 15.9]:
+        noise = Noise(1, size=size, speed=0.6, seed=1)
+        assert np.array_equal(noise.field(100, 80, 4), exact_noise(noise, 100, 80, 4))
 
 
 def test_zero_noise_gives_the_flat_slice():
@@ -213,18 +240,21 @@ def test_zero_noise_gives_the_flat_slice():
 
 def test_noisy_column_sampler_matches_general_sampler():
     # Whole-plane sweeps, so some points fall outside the video too.
-    for kind, angle in [("rotate", 30), ("rotate", 120), ("shear", 20)]:
-        for direction in ["time", "perpendicular"]:
-            noise = Noise(1.5, size=3.0, speed=0.6, direction=direction, seed=1)
-            sweep = timeslice.plan_sweep(T, W, kind, angle, noise=noise)
-            for f in range(sweep.frames):
-                t, x = sweep.at(f)
-                for nearest in [False, True]:
-                    fast = timeslice.sample_noisy_columns(
-                        volume, t, x, noise.push(sweep.normal), noise, f, nearest)
-                    slow = timeslice.sample(
-                        volume, *timeslice.surface(sweep, f, H, noise), nearest)
-                    assert np.array_equal(fast, slow), (kind, angle, direction, f)
+    cases = [(kind, angle, direction, size)
+             for kind, angle in [("rotate", 30), ("rotate", 120), ("shear", 20)]
+             for direction in ["time", "perpendicular"]
+             for size in [3.0, 24.0]]  # noise at every pixel, and from nodes
+    for kind, angle, direction, size in cases:
+        noise = Noise(1.5, size=size, speed=0.6, direction=direction, seed=1)
+        sweep = timeslice.plan_sweep(T, W, kind, angle, noise=noise)
+        for f in range(sweep.frames):
+            t, x = sweep.at(f)
+            for nearest in [False, True]:
+                fast = timeslice.sample_noisy_columns(
+                    volume, t, x, noise.push(sweep.normal), noise, f, nearest)
+                slow = timeslice.sample(
+                    volume, *timeslice.surface(sweep, f, H, noise), nearest)
+                assert np.array_equal(fast, slow), (kind, angle, direction, f)
 
 
 def test_time_noise_reads_each_pixel_earlier_or_later():

@@ -324,6 +324,61 @@ def _permutation(seed):
     return np.concatenate([p, p]).astype(np.int64)
 
 
+# Working the noise out at every pixel is slow, and it changes little from
+# one pixel to the next, so it's worked out at nodes NOISE_STEPS to every
+# `size` pixels and blended smoothly in between (Catmull-Rom). That comes
+# within about half a percent of the amplitude of the noise itself. Nodes
+# under 2 pixels apart would save nothing, so then there's one at every
+# pixel, which gives the noise exactly.
+NOISE_STEPS = 8
+
+
+def _catmull_rom(t):
+    """For points t of the way (0 to 1) between the middle two of 4 evenly
+    spaced nodes, how much each node counts, shape (len(t), 4)."""
+    t2, t3 = t * t, t * t * t
+    return np.stack([-t3 + 2 * t2 - t, 3 * t3 - 5 * t2 + 2,
+                     -3 * t3 + 4 * t2 + t, t3 - t2], -1) / 2
+
+
+def _nodes(n, size):
+    """Where to work out the noise along an axis of n pixels, and how to
+    blend it back: the nodes' noise coordinates, and for each pixel the
+    first of the 4 nodes around it and their weights."""
+    step = size / NOISE_STEPS
+    if step < 2:
+        step = 1.0
+    pos = np.arange(n) / step
+    first = np.floor(pos).astype(np.int64)
+    # One node before the first pixel and two past the last, for the blend.
+    return (np.arange(first[-1] + 4) - 1) * step / size, first, \
+        _catmull_rom(pos - first)
+
+
+@njit(cache=True, inline="always")
+def _blend_row(nodes, cols, col_w, first_row, row_w, across, out):
+    """Blend the noise at the nodes back to one row of pixels, into out:
+    first the 4 rows of nodes around it into one (across), then each pixel
+    from the 4 nodes around it. Clamped to -1 to 1, which a blend could
+    otherwise overshoot by a hair."""
+    r = first_row
+    for m in range(nodes.shape[1]):
+        across[m] = (row_w[0] * nodes[r, m] + row_w[1] * nodes[r + 1, m]
+                     + row_w[2] * nodes[r + 2, m] + row_w[3] * nodes[r + 3, m])
+    for j in range(cols.shape[0]):
+        c = cols[j]
+        v = (col_w[j, 0] * across[c] + col_w[j, 1] * across[c + 1]
+             + col_w[j, 2] * across[c + 2] + col_w[j, 3] * across[c + 3])
+        out[j] = min(1.0, max(-1.0, v))
+
+
+@njit(parallel=True, cache=True)
+def _fill_noise(nodes, cols, col_w, rows, row_w, out):
+    for row in prange(out.shape[0]):
+        _blend_row(nodes, cols, col_w, rows[row], row_w[row],
+                   np.empty(nodes.shape[1]), out[row])
+
+
 class Noise(NamedTuple):
     """Perlin noise that pushes each point of a sweep's frame off its plane.
 
@@ -354,28 +409,31 @@ class Noise(NamedTuple):
         return self._replace(amplitude=self.amplitude * factor,
                              size=self.size * factor)
 
-    def _lattice(self, width, height, f):
-        """The hash, and where output frame f's columns, rows and position in
-        the sweep fall in the noise."""
-        return (_permutation(self.seed), np.arange(width) / self.size,
-                np.arange(height) / self.size, f * self.speed / self.size)
+    def _grid(self, width, height, f):
+        """The noise at the nodes for output frame f, from -1 to 1, and how
+        to blend it back to each column and row."""
+        us, cols, col_w = _nodes(width, self.size)
+        vs, rows, row_w = _nodes(height, self.size)
+        nodes = np.empty((len(vs), len(us)))
+        _noise_grid(_permutation(self.seed), us, vs, f * self.speed / self.size,
+                    nodes)
+        return nodes / NOISE_BOUND, cols, col_w, rows, row_w
 
     def field(self, width, height, f):
         """The noise over output frame f, from -1 to 1, shape (height, width)."""
         out = np.empty((height, width))
-        _noise_grid(*self._lattice(width, height, f), out)
-        return out / NOISE_BOUND
+        _fill_noise(*self._grid(width, height, f), out)
+        return out
 
 
 @njit(parallel=True, cache=True)
-def _sample_noisy_columns(volume, t, x, push_t, push_x, perm, us, vs, z,
-                          nearest, out):
+def _sample_noisy_columns(volume, t, x, push_t, push_x, nodes, cols, col_w,
+                          rows, row_w, nearest, out):
     for row in prange(volume.shape[1]):
-        # Work out the whole row's bumps before reading any of it: doing both
-        # in one loop is about a fifth slower.
+        # Blend the whole row's bumps from the nodes, then read the row.
         bumps = np.empty(t.shape[0])
-        for j in range(t.shape[0]):
-            bumps[j] = _noise3(perm, us[j], vs[row], z) / NOISE_BOUND
+        _blend_row(nodes, cols, col_w, rows[row], row_w[row],
+                   np.empty(nodes.shape[1]), bumps)
         for j in range(t.shape[0]):
             _read_in_row(volume, t[j] + push_t * bumps[j], row,
                          x[j] + push_x * bumps[j], nearest, out, j)
@@ -394,7 +452,7 @@ def sample_noisy_columns(volume, t, x, push, noise, f, nearest=False):
     out = np.empty((height, len(t)) + volume.shape[3:], np.uint8)
     _sample_noisy_columns(volume, np.asarray(t, np.float64), np.asarray(x, np.float64),
                           float(push[0]), float(push[1]),
-                          *noise._lattice(len(t), height, f), nearest, out)
+                          *noise._grid(len(t), height, f), nearest, out)
     return out
 
 
