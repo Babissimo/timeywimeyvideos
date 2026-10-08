@@ -513,18 +513,22 @@ def sample_noisy_columns(volume, t, x, push, noise, f, nearest=False, wrap=False
 
 # Slice planning. Each function returns a Sweep: the output frame width, the
 # number of output frames, at(f), which gives the (t, x) source position of
-# every column of output frame f, for use with sample_columns, and the (t, x)
-# normal of the frame's plane, which perpendicular noise pushes along.
+# every column of output frame f, for use with sample_columns, the (t, x)
+# normal of the frame's plane, which perpendicular noise pushes along, and
+# whether it loops. A loop runs round time in a ring, so at(f) can lie past
+# either end of the clip, and is read with wrap.
 #
 # Given noise, a plan allows for it pushing points as far as it can: the
 # whole-plane sweep starts and ends early and late enough to catch the bumps,
-# and --inside frames keep far enough from the edges that none leave the video.
+# and --inside and --loop frames keep far enough from the edges that none leave
+# the video.
 
 class Sweep(NamedTuple):
     width: int
     frames: int
     at: Callable[[int], tuple]
     normal: tuple
+    loop: bool = False
 
 
 def _push(noise, normal):
@@ -561,6 +565,11 @@ def _too_long(angle, width, span_t, push_t, n_frames, kind=""):
             f"only {n_frames}.")
 
 
+def _pushed_sideways(angle, push_x):
+    return (f"At {angle:g} degrees the noise can push the ends of the frame "
+            f"{abs(push_x):.3g} pixels sideways, out of the video.")
+
+
 def _rotation(angle):
     theta = math.radians(angle)
     # Round so that 0, 90, 180... degrees land exactly on the voxel grid.
@@ -578,8 +587,8 @@ def _rotation_room(n_frames, width, angle, noise=None):
             (width - 1) * (1 - abs(c)) / 2 - abs(push_x))
 
 
-def rotation_sweep(n_frames, width, angle, inside=False, motion="longest",
-                   noise=None):
+def rotation_sweep(n_frames, width, angle, inside=False, motion=None,
+                   noise=None, loop=False):
     """Plan a sweep with the slicing plane rotated `angle` degrees about y.
 
     Without `inside`, the frame is wide enough to hold the plane's whole cut
@@ -589,15 +598,33 @@ def rotation_sweep(n_frames, width, angle, inside=False, motion="longest",
     With `inside`, the frame is as wide as the input and stays entirely inside
     the cuboid, moving along a straight line through the cuboid's centre:
     "perpendicular" to itself, straight through "time", or along the "longest"
-    line that fits. Raises DoesNotFit if the clip is too short for the angle.
+    line that fits (the default). Raises DoesNotFit if the clip is too short
+    for the angle.
+
+    With `loop`, time runs round in a ring, the clip's first frame following
+    its last. The frame is as wide as the input and moves straight through
+    time once round the ring, so the last output frame leads back into the
+    first. It stays inside the video, so `inside` makes no difference, and no
+    clip is too short.
 
     With `noise`, the sweep allows for the noise pushing points off the plane.
     """
     c, s = _rotation(angle)
     normal = (c, -s)  # (t, x): the way the whole plane sweeps
     push_t, push_x = _push(noise, normal)
+    # Move forward in time unless the plane is turned past 90 degrees,
+    # where the sweep runs backwards (180 degrees plays the clip in reverse).
+    sign_t = 1 if c >= 0 else -1
 
-    if not inside:
+    if loop:
+        if motion not in (None, "time"):
+            raise ValueError("a loop can only move straight through time")
+        if _rotation_room(n_frames, width, angle, noise)[1] < 0:
+            raise DoesNotFit(_pushed_sideways(angle, push_x) + " " + _angles_that_fit(
+                lambda a: _rotation_room(n_frames, width, a, noise)[1] >= 0, 90))
+        out_width, out_frames = width, n_frames
+        dx, dt = 0.0, sign_t
+    elif not inside:
         ahead = abs(push_t * c - push_x * s)  # how far bumps reach off the plane
         out_width = max(1, round(width * abs(c) + n_frames * abs(s)))
         out_frames = max(1, round(width * abs(s) + n_frames * abs(c) + 2 * ahead))
@@ -611,14 +638,11 @@ def rotation_sweep(n_frames, width, angle, inside=False, motion="longest",
             if room_t < 0:
                 why = _too_long(angle, width, (width - 1) * abs(s), push_t, n_frames)
             else:
-                why = (f"At {angle:g} degrees the noise can push the ends of the "
-                       f"frame {abs(push_x):.3g} pixels sideways, out of the video.")
+                why = _pushed_sideways(angle, push_x)
             raise DoesNotFit(why + " " + _angles_that_fit(
                 lambda a: min(_rotation_room(n_frames, width, a, noise)) >= 0, 90))
 
-        # Move forward in time unless the plane is turned past 90 degrees,
-        # where the sweep runs backwards (180 degrees plays the clip in reverse).
-        sign_t = 1 if c >= 0 else -1
+        motion = motion or "longest"
         if motion == "perpendicular":
             dx, dt = -s, c
         elif motion == "time":
@@ -643,7 +667,7 @@ def rotation_sweep(n_frames, width, angle, inside=False, motion="longest",
         step = f - (out_frames - 1) / 2  # distance moved from the centre
         return centre_t + step * dt + across * s, centre_x + step * dx + across * c
 
-    return Sweep(out_width, out_frames, at, normal)
+    return Sweep(out_width, out_frames, at, normal, loop)
 
 
 def _shear(angle):
@@ -663,7 +687,7 @@ def _shear_room(n_frames, width, angle, noise=None):
     return n_frames - 1 - abs(k) * (width - 1) - 2 * abs(push_t), -abs(push_x)
 
 
-def shear_sweep(n_frames, width, angle, inside=False, noise=None):
+def shear_sweep(n_frames, width, angle, inside=False, noise=None, loop=False):
     """Plan a sweep where output column x is input column x, delayed in time
     by tan(angle) frames per pixel across the frame.
 
@@ -671,11 +695,13 @@ def shear_sweep(n_frames, width, angle, inside=False, noise=None):
     time per output frame. Without `inside`, it runs from where the slice
     first touches the video to where it leaves, black where it's outside.
     With `inside`, only positions entirely inside the video are kept; raises
-    DoesNotFit if the clip is too short for the angle.
+    DoesNotFit if the clip is too short for the angle. With `loop`, time runs
+    round in a ring, the clip's first frame following its last, and the frame
+    goes once round it, so the last output frame leads back into the first.
 
     With `noise`, the sweep allows for the noise pushing points off the plane.
-    Perpendicular noise pushes the frame's ends sideways, so with `inside` it
-    only fits at 0 degrees.
+    Perpendicular noise pushes the frame's ends sideways, so with `inside` or
+    `loop` it only fits at 0 degrees.
     """
     if not -90 < angle < 90:
         raise ValueError("shear needs an angle between -90 and 90 degrees "
@@ -686,7 +712,7 @@ def shear_sweep(n_frames, width, angle, inside=False, noise=None):
     delay = (x - (width - 1) / 2) * k
     span_t = abs(k) * (width - 1)  # frames of time one output frame covers
 
-    if inside:
+    if inside or loop:
         room_t, room_x = _shear_room(n_frames, width, angle, noise)
         if room_x < 0:
             raise DoesNotFit(
@@ -694,12 +720,12 @@ def shear_sweep(n_frames, width, angle, inside=False, noise=None):
                 f"a sheared frame {abs(push_x):.3g} pixels sideways, out of the "
                 "video, and a sheared frame always spans the video's whole "
                 "width. Push the noise through time instead.")
-        if room_t < 0:
+        if room_t < 0 and not loop:
             raise DoesNotFit(
                 _too_long(angle, width, span_t, push_t, n_frames, "sheared ")
                 + " " + _angles_that_fit(
                     lambda a: min(_shear_room(n_frames, width, a, noise)) >= 0, 89.9))
-        out_frames = int(room_t + 1e-9) + 1
+        out_frames = n_frames if loop else int(room_t + 1e-9) + 1
     else:
         out_frames = int(n_frames - 1 + span_t + 2 * abs(push_t) + 1e-9) + 1
 
@@ -708,26 +734,31 @@ def shear_sweep(n_frames, width, angle, inside=False, noise=None):
     def at(f):
         return centre_t + (f - (out_frames - 1) / 2) + delay, x
 
-    return Sweep(width, out_frames, at, normal)
+    return Sweep(width, out_frames, at, normal, loop)
 
 
 def plan_sweep(n_frames, width, slice="rotate", angle=45.0, inside=False,
-               motion=None, noise=None):
-    """Plan a sweep of either kind. motion only applies to rotate with
-    inside, and defaults to "longest" there."""
+               motion=None, noise=None, loop=False):
+    """Plan a sweep of either kind. motion only applies to rotate, with
+    inside or loop."""
     if slice == "shear":
-        return shear_sweep(n_frames, width, angle, inside, noise)
+        return shear_sweep(n_frames, width, angle, inside, noise, loop)
     if slice == "rotate":
-        return rotation_sweep(n_frames, width, angle, inside, motion or "longest",
-                              noise)
+        return rotation_sweep(n_frames, width, angle, inside, motion, noise, loop)
     raise ValueError(f"unknown slice {slice!r}")
+
+
+def _looping(noise, sweep):
+    """The noise as the sweep uses it: a loop's comes back round with it."""
+    return noise._replace(period=sweep.frames) if sweep.loop else noise
 
 
 def surface(sweep, f, height, noise):
     """The (t, y, x) source position of every pixel of output frame f, with
     the frame pushed off its plane by the noise, as arrays that broadcast to
-    (height, sweep.width) for sample(). Use the noise the sweep was planned
-    with."""
+    (height, sweep.width) for sample(), with wrap if the sweep loops. Use the
+    noise the sweep was planned with."""
+    noise = _looping(noise, sweep)
     t, x = sweep.at(f)
     bump = noise.field(sweep.width, height, f)
     push_t, push_x = noise.push(sweep.normal)
@@ -739,9 +770,10 @@ def slice_frame(volume, sweep, f, noise=None, nearest=False):
     plane by the noise the sweep was planned with, if any."""
     t, x = sweep.at(f)
     if noise is None:
-        return sample_columns(volume, t, x, nearest)
+        return sample_columns(volume, t, x, nearest, sweep.loop)
+    noise = _looping(noise, sweep)
     return sample_noisy_columns(volume, t, x, noise.push(sweep.normal), noise, f,
-                                nearest)
+                                nearest, sweep.loop)
 
 
 def main():
@@ -763,6 +795,10 @@ def main():
     parser.add_argument("--motion", choices=["perpendicular", "time", "longest"],
                         help="with --slice rotate --inside: the straight line "
                              "the frame moves along (default longest)")
+    parser.add_argument("--loop", action="store_true",
+                        help="make a seamless loop: time runs round in a ring, "
+                             "the first frame following the last, and a frame "
+                             "the input's width goes once round it")
     parser.add_argument("--noise", type=float, default=0.0, metavar="A",
                         help="push each point of the slicing surface up to A "
                              "frames off the plane with Perlin noise (default "
@@ -796,6 +832,10 @@ def main():
         parser.error("--motion doesn't apply to --slice shear: a sheared frame "
                      "always uses every input column, so it can only move "
                      "through time")
+    if args.loop and (args.inside or args.motion):
+        parser.error("--inside and --motion don't apply to --loop: a looping "
+                     "frame always stays inside the video and moves straight "
+                     "through time")
     if args.motion and not args.inside:
         parser.error("--motion needs --inside: without it the frame already "
                      "holds the plane's whole cut through the video, so moving "
@@ -827,8 +867,10 @@ def main():
 
     try:
         sweep = plan_sweep(n_frames, width, args.slice, args.angle, args.inside,
-                           args.motion, noise)
+                           args.motion, noise, args.loop)
     except DoesNotFit as err:
+        if args.loop:  # only sideways noise can leave a loop's frame
+            sys.exit(f"{err}\nUse less --noise, or --noise-direction time.")
         smaller = "a smaller angle or less --noise" if noise else "a smaller angle"
         sys.exit(f"{err}\nUse a longer clip or {smaller}, or drop --inside "
                  f"to sweep the whole plane with black edges.")

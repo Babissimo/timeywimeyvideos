@@ -31,6 +31,7 @@ uv run timeslice.py input.mp4 output.mp4 --angle 30             # final cut
 | `--slice rotate\|shear` | how to read along the tilted plane (default `rotate`; see below) |
 | `--inside` | keep each frame the input's width and entirely inside the video: no black edges |
 | `--motion perpendicular\|time\|longest` | with `--slice rotate --inside`: which way the frame moves (default `longest`) |
+| `--loop` | make a video that loops seamlessly: time runs round in a ring (see below) |
 | `--noise A` | push each point of the surface up to A frames off the plane with Perlin noise (default 0: flat; see below) |
 | `--noise-size PX` | roughly how far apart the bumps are, in pixels (default 64) |
 | `--noise-speed PX` | how fast the bumps change, in pixels per output frame (default 1; 0 keeps them still) |
@@ -204,6 +205,32 @@ about 22 ms against 17 flat, and full renders, which spend most of their
 time encoding, took no measurably longer. Preview frames took about 5 ms
 against 4.4.
 
+### Loops (`--loop`)
+
+`--loop` makes a video that plays on repeat without a jump. Time runs round
+in a ring, the clip's first frame following its last, and the frame moves
+straight through time once round it. So the video is as long as the clip,
+and its last frame leads back into its first. At 0° it is the clip itself.
+
+Each frame is the input's width and stays inside the video, as with
+`--inside`, but since time wraps round, no clip is too short for an angle.
+Only perpendicular noise can take a frame out of the video, by pushing its
+ends sideways. As with `--inside`, a rotated frame has no room for that at
+small angles other than 0° (the error message says which angles fit), and a
+sheared one at any angle but 0°.
+
+The join from the clip's last frame back to its first becomes part of the
+video. Unless the clip already loops, it shows as a tear in time that
+crosses each frame once per loop.
+
+Surface noise loops too: after one loop the bumps are back in the shape they
+started in. For that, the noise has to move through a whole number of its
+cells (each `--noise-size` across) per loop, so `--noise-speed` is rounded
+to the nearest speed that does, and to at least two cells, since over one
+the bumps barely change. A preview's loop has half as many frames, so where
+the rounding is close it can land on one cell more or fewer than the full
+render's.
+
 ## Code layout
 
 `timeslice.py` is split so that new kinds of slices only need new coordinates:
@@ -211,12 +238,14 @@ against 4.4.
 - `sample(volume, t, y, x)` reads the video at any (t, y, x) positions, so it
   works for any surface. Each point blends the 8 voxels around it, weighted
   by closeness (linear interpolation); points outside the cuboid are black.
+  With `wrap`, time runs round in a ring instead, for loops.
 - `sample_columns(volume, t, x)` is a faster version for slices made of whole
   source columns, which is what any tilt about the y axis gives. It only
   blends across x and t (4 voxels), or copies the nearest one for previews.
 - `rotation_sweep(...)` and `shear_sweep(...)` plan a sweep: the output size,
-  `at(f)`, the (t, x) position of every column of output frame f, and the
-  normal of the frame's plane. Given noise, they make room for it.
+  `at(f)`, the (t, x) position of every column of output frame f, the
+  normal of the frame's plane, and whether it loops. Given noise, they make
+  room for it.
 - `plan_sweep(...)` picks between them.
 - `Noise` is the surface noise: `field(...)` gives its values over a frame,
   blended from points `NOISE_STEPS` to every `size` pixels, and

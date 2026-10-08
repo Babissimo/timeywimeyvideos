@@ -398,6 +398,91 @@ def test_sheared_inside_frames_only_take_perpendicular_noise_at_zero_degrees():
     assert timeslice.shear_sweep(13, 5, 0, inside=True, noise=noise).frames == 11
 
 
+
+# Loops.
+
+def loop(kind, angle, vol=volume, **kwargs):
+    return timeslice.plan_sweep(len(vol), vol.shape[2], kind, angle, loop=True, **kwargs)
+
+
+def frames_of(vol, sweep, noise=None, nearest=False, frames=None):
+    return np.stack([timeslice.slice_frame(vol, sweep, f, noise, nearest)
+                     for f in range(sweep.frames if frames is None else frames)])
+
+
+def test_a_loop_at_zero_degrees_is_the_clip():
+    for kind in ["rotate", "shear"]:
+        sweep = loop(kind, 0)
+        assert sweep.loop and sweep.frames == T and sweep.width == W
+        assert np.array_equal(frames_of(volume, sweep), volume)
+
+
+def test_a_loop_comes_back_round_to_its_first_frame():
+    # The frame after the last is the first again, so played on repeat the
+    # video never jumps, at any angle and with noise too.
+    noise = Noise(1.5, size=3.0, speed=0.6, seed=1)
+    for kind, angle in [("rotate", 30), ("rotate", 90), ("rotate", 135),
+                        ("rotate", -60), ("shear", 45), ("shear", -70)]:
+        sweep = loop(kind, angle, noise=noise)
+        assert sweep.frames == T and sweep.width == W
+        t0, x0 = sweep.at(0)
+        t1, x1 = sweep.at(sweep.frames)
+        assert np.allclose(np.abs(t1 - t0), T) and np.allclose(x1, x0)
+        for bumps in [None, noise]:
+            first = timeslice.slice_frame(volume, sweep, 0, bumps).astype(int)
+            after = timeslice.slice_frame(volume, sweep, sweep.frames, bumps).astype(int)
+            assert np.abs(after - first).max() <= 1, (kind, angle, bumps)
+
+
+def test_a_loop_moves_straight_through_time_inside_the_video():
+    for angle in [10, 45, 80, 90, 135, -30]:
+        sweep = loop("rotate", angle)
+        sign = 1 if math.cos(math.radians(angle)) >= 0 else -1
+        for f in range(sweep.frames):
+            t, x = sweep.at(f)
+            assert np.allclose(t - sweep.at(0)[0], sign * f)
+            assert x.min() > -1e-9 and x.max() < W - 1 + 1e-9
+    # However short the clip, since time wraps round.
+    assert loop("rotate", 80, long_volume[:2]).frames == 2
+
+
+def test_a_loop_reads_round_the_end_of_the_clip():
+    # At 45 degrees column x of shear frame f is frame f + x - 5, wrapped.
+    frames = frames_of(volume, loop("shear", 45))
+    for f in range(T):
+        for x in range(W):
+            assert np.array_equal(frames[f, :, x], volume[(f + x - 5) % T, :, x])
+
+
+def test_noisy_loops_match_the_general_sampler():
+    for kind, angle, direction in [("rotate", 30, "time"), ("rotate", 70, "perpendicular"),
+                                   ("shear", 20, "time")]:
+        noise = Noise(1.5, size=3.0, speed=0.6, direction=direction, seed=1)
+        sweep = loop(kind, angle, noise=noise)
+        for f in range(sweep.frames):
+            for nearest in [False, True]:
+                slow = timeslice.sample(volume, *timeslice.surface(sweep, f, H, noise),
+                                        nearest, wrap=True)
+                assert np.array_equal(
+                    timeslice.slice_frame(volume, sweep, f, noise, nearest), slow)
+
+
+def test_a_loop_only_takes_perpendicular_noise_that_keeps_inside():
+    sideways = Noise(1.0, direction="perpendicular")
+    text = message(timeslice.rotation_sweep, 13, 5, 20, noise=sideways, loop=True)
+    assert "sideways" in text and text.endswith("Angles of 0 and 53.2 to 90 degrees fit this clip.")
+    assert timeslice.rotation_sweep(13, 5, 60, noise=sideways, loop=True).frames == 13
+    assert "Push the noise through time" in message(
+        timeslice.shear_sweep, 13, 5, 20, noise=sideways, loop=True)
+    # Noise through time never leaves a ring.
+    assert timeslice.shear_sweep(3, 5, 80, noise=Noise(9.0), loop=True).frames == 3
+
+
+def test_a_loop_only_moves_through_time():
+    raises(ValueError, timeslice.rotation_sweep, T, W, 30, motion="longest", loop=True)
+    assert loop("rotate", 30, motion="time").frames == T
+
+
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):
