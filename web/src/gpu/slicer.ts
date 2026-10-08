@@ -1,8 +1,8 @@
-/** Slices a volume on the GPU as timeslice.sample_columns does. */
+/** Slices a volume on the GPU as timeslice.sample_columns and sample_noisy_columns do. */
 import { floorMod } from "../pymath";
 import type { Columns, NoiseGrid } from "../types";
 import { bind, dataTexture, fill, framebuffer, program, type Program } from "./gl";
-import { COVER, FLAT, SHOW } from "./shaders";
+import { COVER, FLAT, NOISY, SHOW } from "./shaders";
 import type { Volume } from "./volume";
 
 export interface SliceOptions {
@@ -63,12 +63,35 @@ function flatColumns(columns: Columns, frames: number, width: number, nearest: b
   return out;
 }
 
+/**
+ * Where each output column of a noisy slice reads before the noise moves it: t[j] and x[j]
+ * floored, with the column's first node column; then t[j] and x[j] past those, and in a
+ * second row the column's node weights. The shader finishes each pixel.
+ */
+function noisyColumns(columns: Columns, grid: NoiseGrid) {
+  const n = columns.t.length;
+  const floors = new Int32Array(4 * n);
+  const offsets = new Float32Array(8 * n);
+  for (let j = 0; j < n; j++) {
+    const t = Math.floor(columns.t[j]), x = Math.floor(columns.x[j]);
+    floors.set([t, x, grid.cols[j]], 4 * j);
+    offsets.set([columns.t[j] - t, columns.x[j] - x], 4 * j);
+  }
+  offsets.set(grid.colW, 4 * n);
+  return { floors, offsets };
+}
+
 export class Slicer {
   private readonly gl: WebGL2RenderingContext;
   private readonly flat: Program;
+  private readonly noisy: Program;
   private readonly show: Program;
   private readonly vao: WebGLVertexArrayObject;
   private readonly columns: WebGLTexture;
+  private readonly offsets: WebGLTexture;
+  private readonly rows: WebGLTexture;
+  private readonly rowWeights: WebGLTexture;
+  private readonly nodes: WebGLTexture;
   // The slice goes into an RGBA8UI texture, row 0 its top. The shaders round each level
   // as timeslice does, and an integer target keeps that level as is, where a normalised
   // one would convert it back from a float, which GLES lets round to either neighbour.
@@ -83,35 +106,66 @@ export class Slicer {
     this.maxSize = Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE) as number,
                             ...(gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array));
     this.flat = program(gl, COVER, FLAT, { volume: 0, columns: 1 }, ["nearest"]);
+    this.noisy = program(gl, COVER, NOISY,
+                         { volume: 0, columns: 1, offsets: 2, rows: 3, rowWeights: 4, nodes: 5 },
+                         ["push", "size", "nearest", "wrap", "wrapX"]);
     this.show = program(gl, COVER, SHOW, { slice: 0 }, ["view"]);
     this.vao = gl.createVertexArray();
-    this.columns = dataTexture(gl);
+    [this.columns, this.offsets, this.rows, this.rowWeights, this.nodes] =
+      Array.from({ length: 5 }, () => dataTexture(gl));
     this.output = dataTexture(gl);
     this.framebuffer = framebuffer(gl, this.output);
   }
 
   /**
-   * Slice a frame columns.t.length wide and volume.height high, for read or draw. Throws
-   * RangeError for a frame larger than the GPU can draw.
+   * Slice a frame columns.t.length wide and volume.height high, for read or draw. With
+   * noise, its grid is for a frame that size. Throws RangeError for a frame, or a grid of
+   * noise nodes, larger than the GPU can take.
    */
   slice(volume: Volume, columns: Columns, options: SliceOptions = {}): void {
     const { gl } = this;
-    const { nearest = false, wrap = false, wrapX = false } = options;
+    const { nearest = false, wrap = false, wrapX = false, noise } = options;
     const width = columns.t.length, height = volume.height;
     if (columns.x.length !== width)
       throw new RangeError(`columns need an x for each t, not ${columns.x.length} for ${width}`);
     if (width > this.maxSize || height > this.maxSize)
       throw new RangeError(`a slice of ${width} × ${height} pixels is more than the GPU's `
                            + `limit of ${this.maxSize} each way`);
+    if (noise && (noise.grid.cols.length !== width || noise.grid.rows.length !== height))
+      throw new RangeError(`a noise grid for ${noise.grid.cols.length} × `
+                           + `${noise.grid.rows.length} pixels can't push a slice of `
+                           + `${width} × ${height}`);
+    if (noise && Math.max(noise.grid.nodeCols, noise.grid.nodeRows) > this.maxSize)
+      throw new RangeError(`a noise grid of ${noise.grid.nodeCols} × ${noise.grid.nodeRows} `
+                           + `nodes is more than the GPU's limit of ${this.maxSize} each way`);
     if (width !== this.width || height !== this.height) {
       fill(gl, this.output, gl.RGBA8UI, width, height, null);
       this.width = width;
       this.height = height;
     }
-    fill(gl, this.columns, gl.RGBA32I, width, 4,
-         flatColumns(columns, volume.frames, volume.width, nearest, wrap, wrapX));
-    gl.useProgram(this.flat.program);
-    gl.uniform1i(this.flat.uniforms.nearest, Number(nearest));
+    if (noise) {
+      const { grid, push } = noise;
+      const { floors, offsets } = noisyColumns(columns, grid);
+      fill(gl, this.columns, gl.RGBA32I, width, 1, floors);
+      fill(gl, this.offsets, gl.RGBA32F, width, 2, offsets);
+      fill(gl, this.rows, gl.R32I, height, 1, grid.rows);
+      fill(gl, this.rowWeights, gl.RGBA32F, height, 1, new Float32Array(grid.rowW));
+      fill(gl, this.nodes, gl.R32F, grid.nodeCols, grid.nodeRows, new Float32Array(grid.nodes));
+      const { program, uniforms } = this.noisy;
+      gl.useProgram(program);
+      gl.uniform2f(uniforms.push, push[0], push[1]);
+      gl.uniform2i(uniforms.size, volume.frames, volume.width);
+      gl.uniform1i(uniforms.nearest, Number(nearest));
+      gl.uniform1i(uniforms.wrap, Number(wrap));
+      gl.uniform1i(uniforms.wrapX, Number(wrapX));
+      [this.offsets, this.rows, this.rowWeights, this.nodes]
+        .forEach((texture, i) => bind(gl, 2 + i, texture));
+    } else {
+      fill(gl, this.columns, gl.RGBA32I, width, 4,
+           flatColumns(columns, volume.frames, volume.width, nearest, wrap, wrapX));
+      gl.useProgram(this.flat.program);
+      gl.uniform1i(this.flat.uniforms.nearest, Number(nearest));
+    }
     bind(gl, 0, volume.texture, gl.TEXTURE_2D_ARRAY);
     bind(gl, 1, this.columns);
     this.cover(this.framebuffer, width, height);
@@ -139,8 +193,10 @@ export class Slicer {
 
   dispose(): void {
     const { gl } = this;
-    for (const { program } of [this.flat, this.show]) gl.deleteProgram(program);
-    for (const texture of [this.columns, this.output]) gl.deleteTexture(texture);
+    for (const { program } of [this.flat, this.noisy, this.show]) gl.deleteProgram(program);
+    for (const texture of [this.columns, this.offsets, this.rows, this.rowWeights, this.nodes,
+                           this.output])
+      gl.deleteTexture(texture);
     gl.deleteFramebuffer(this.framebuffer);
     gl.deleteVertexArray(this.vao);
   }

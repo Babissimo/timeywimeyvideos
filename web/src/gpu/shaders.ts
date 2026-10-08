@@ -63,6 +63,84 @@ void main() {
   }
 }`;
 
+/**
+ * A slice pushed off its plane by noise: each pixel works out its own noise and where that
+ * moves it, then reads the volume there, as timeslice._sample_noisy_columns does.
+ */
+export const NOISY = `${HEADER}${VOXEL}${BLEND}
+uniform highp isampler2D columns;      // per column: t[j] and x[j] floored, first node column
+uniform highp sampler2D offsets;       // per column: t[j] and x[j] past those; row 1 node weights
+uniform highp isampler2D rows;         // per row: first node row
+uniform highp sampler2D rowWeights;    // per row: node weights
+uniform highp sampler2D nodes;         // the noise at the nodes
+uniform vec2 push;                     // the (t, x) move where the noise is strongest
+uniform ivec2 size;                    // the volume's frames and width
+uniform bool nearest, wrap, wrapX;
+out uvec4 colour;
+
+float node(int column, int row) {
+  return texelFetch(nodes, ivec2(column, row), 0).x;
+}
+
+// The noise at pixel (j, row), as timeslice._blend_row works it out: the 4 rows of nodes
+// around it blended into one, then the 4 nodes of that around it, clamped to -1 to 1.
+float bump(int j, int row, int first) {
+  int r = texelFetch(rows, ivec2(row, 0), 0).x;
+  vec4 down = texelFetch(rowWeights, ivec2(row, 0), 0);
+  vec4 across = texelFetch(offsets, ivec2(j, 1), 0);
+  float v = 0.0;
+  for (int k = 0; k < 4; k++) {
+    int m = first + k;
+    v += across[k] * (down.x * node(m, r) + down.y * node(m, r + 1)
+                      + down.z * node(m, r + 2) + down.w * node(m, r + 3));
+  }
+  return clamp(v, -1.0, 1.0);
+}
+
+// Whether lo + f lies in [-0.5, n - 0.5), for whole lo and f from 0 to 1.
+bool within(int lo, float f, int n) {
+  return (lo > -1 || (lo == -1 && f >= 0.5)) && (lo < n - 1 || (lo == n - 1 && f < 0.5));
+}
+
+// a mod n, from 0 to n - 1. GLSL leaves % undefined for negative operands.
+int floorMod(int a, int n) {
+  return a >= 0 ? a % n : n - 1 - (-1 - a) % n;
+}
+
+// As timeslice._neighbours: the voxels either side of lo + f along an axis of n.
+ivec2 neighbours(int lo, int n, bool ring) {
+  return ring ? ivec2(floorMod(lo, n), floorMod(lo + 1, n)) : ivec2(max(lo, 0), min(lo + 1, n - 1));
+}
+
+void main() {
+  int j = int(gl_FragCoord.x), row = int(gl_FragCoord.y);
+  ivec4 at = texelFetch(columns, ivec2(j, 0), 0);
+  // Where the pixel reads, as a whole number and a fraction of a frame or column, relative
+  // to its column's floors so that float32 keeps the fractions close to float64's.
+  vec2 offset = texelFetch(offsets, ivec2(j, 0), 0).xy + push * bump(j, row, at.z);
+  vec2 whole = floor(offset);
+  float ft = offset.x - whole.x, fx = offset.y - whole.y;
+  int t = at.x + int(whole.x), x = at.y + int(whole.y);
+  if (!((wrap || within(t, ft, size.x)) && (wrapX || within(x, fx, size.y)))) {
+    colour = ${BLACK};
+    return;
+  }
+  ivec2 ts = neighbours(t, size.x, wrap), xs = neighbours(x, size.y, wrapX);
+  if (nearest) {
+    colour = uvec4(voxel(ft >= 0.5 ? ts.y : ts.x, row, fx >= 0.5 ? xs.y : xs.x));
+    return;
+  }
+  vec3 rest = vec3(fx, ft, fx * ft);  // into blend's parts, fx ft already rounded to float32
+  ivec3 w[3];
+  for (int i = 0; i < 3; i++) {
+    rest *= 4096.0;
+    w[i] = ivec3(floor(rest));
+    rest -= floor(rest);
+  }
+  colour = blend(voxel(ts.x, row, xs.x), voxel(ts.x, row, xs.y),
+                 voxel(ts.y, row, xs.x), voxel(ts.y, row, xs.y), w);
+}`;
+
 /** The slice scaled to the canvas, nearest pixel, its first row at the top. */
 export const SHOW = `${HEADER}
 uniform highp usampler2D slice;

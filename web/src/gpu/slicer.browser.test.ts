@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, test } from "vitest";
-import { clips, rgba, sliceCases, Tally, upload } from "./fixture";
+import { Noise } from "../noise";
+import { clips, rgba, type SliceCase, sliceCases, Tally, upload } from "./fixture";
 import { Slicer } from "./slicer";
 import { Volume } from "./volume";
 
@@ -11,23 +12,42 @@ afterAll(() => {
   gl.getExtension("WEBGL_lose_context")?.loseContext();
 });
 
+/** Slice every frame of a case both ways, tallying how closely each matches. */
+function tally(c: SliceCase): { nearest: Tally; bilinear: Tally } {
+  const volume = upload(gl, c.clip);
+  const nearest = new Tally(), bilinear = new Tally();
+  for (const frame of c.frames) {
+    const options = { wrap: c.wrap, wrapX: c.wrapX, noise: frame.noise };
+    slicer.slice(volume, frame.columns, { ...options, nearest: true });
+    nearest.add(slicer.read(), frame.nearest, c.width);
+    slicer.slice(volume, frame.columns, options);
+    bilinear.add(slicer.read(), frame.bilinear, c.width);
+  }
+  volume.dispose();
+  console.log(`${c.name}\n  nearest: ${nearest.summary}\n  bilinear: ${bilinear.summary}`);
+  expect(nearest.translucent + bilinear.translucent).toBe(0);
+  return { nearest, bilinear };
+}
+
 describe("flat slices match timeslice.slice_frame", () => {
-  for (const c of sliceCases) {
+  for (const c of sliceCases.filter((c) => !c.noisy)) {
     test(c.name, () => {
-      const volume = upload(gl, c.clip);
-      const nearest = new Tally(), bilinear = new Tally();
-      for (const frame of c.frames) {
-        slicer.slice(volume, frame.columns, { nearest: true, wrap: c.wrap, wrapX: c.wrapX });
-        nearest.add(slicer.read(), frame.nearest);
-        slicer.slice(volume, frame.columns, { wrap: c.wrap, wrapX: c.wrapX });
-        bilinear.add(slicer.read(), frame.bilinear);
-      }
-      volume.dispose();
-      console.log(`${c.name}\n  nearest: ${nearest.summary}\n  bilinear: ${bilinear.summary}`);
+      const { nearest, bilinear } = tally(c);
       expect(nearest.identical).toBe(nearest.channels);
       expect(bilinear.maxDiff).toBeLessThanOrEqual(1);
       expect(bilinear.identical / bilinear.channels).toBeGreaterThanOrEqual(0.999);
-      expect(nearest.translucent + bilinear.translucent).toBe(0);
+    });
+  }
+});
+
+describe("noisy slices match timeslice.slice_frame", () => {
+  for (const c of sliceCases.filter((c) => c.noisy)) {
+    test(c.name, () => {
+      const { nearest, bilinear } = tally(c);
+      expect(nearest.pixelsIdentical / nearest.pixels).toBeGreaterThanOrEqual(0.995);
+      expect(bilinear.withinOne / bilinear.channels).toBeGreaterThanOrEqual(0.995);
+      // Float32 may put a pixel off here and there, but not most of a column.
+      expect(nearest.wrongColumns + bilinear.wrongColumns).toBe(0);
     });
   }
 });
@@ -64,6 +84,29 @@ describe("Slicer", () => {
     volume.dispose();
     console.log(`random positions\n  bilinear: ${tally.summary}`);
     expect(tally.identical).toBe(tally.channels);
+  });
+
+  test("takes noise only for a frame the size of its grid", () => {
+    const c = sliceCases.find((c) => c.noisy)!;
+    const volume = upload(gl, c.clip);
+    const { columns: { t, x }, noise } = c.frames[0];
+    expect(() => slicer.slice(volume, { t: t.subarray(1), x: x.subarray(1) }, { noise }))
+      .toThrow(RangeError);
+    volume.dispose();
+  });
+
+  test("takes noise only with no more nodes each way than the GPU can hold", () => {
+    const size = Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE) as number,
+                          ...(gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array));
+    const volume = Volume.create(gl, 2, 1, 4);
+    const width = size - 1;
+    const grid = new Noise(1, { size: 3 }).grid(width, 1, 0);  // a node a pixel, and 3 more
+    const columns = { t: new Float64Array(width), x: new Float64Array(width) };
+    const noisy = () => slicer.slice(volume, columns, { noise: { push: [1, 0], grid } });
+    expect(noisy).toThrow(RangeError);
+    expect(noisy).toThrow(`a noise grid of ${size + 2} × ${grid.nodeRows} nodes is more than `
+                          + `the GPU's limit of ${size} each way`);
+    volume.dispose();
   });
 
   test("a 0° slice reproduces the volume", () => {

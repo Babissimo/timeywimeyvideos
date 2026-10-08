@@ -3,26 +3,34 @@
  * tests that check against it.
  */
 import raw from "../../test/fixtures/sampler.json?raw";
-import type { Columns } from "../types";
+import type { Columns, NoiseGrid } from "../types";
 import { Volume } from "./volume";
 
 /** A clip as numpy holds it: (t, y, x) voxels of 3 channels. */
 export interface Clip { frames: number; height: number; width: number; rgb: Uint8Array }
 
-/** An output frame of a sweep: its columns, and what slice_frame makes of them. */
+/** An output frame of a sweep: its columns and noise, and what slice_frame makes of them. */
 export interface SliceFrame {
-  f: number; columns: Columns; bilinear: Uint8Array; nearest: Uint8Array;
+  f: number; columns: Columns; noise?: { push: [number, number]; grid: NoiseGrid };
+  bilinear: Uint8Array; nearest: Uint8Array;
 }
 
 export interface SliceCase {
-  name: string; clip: Clip; wrap: boolean; wrapX: boolean; width: number; frames: SliceFrame[];
+  name: string; clip: Clip; wrap: boolean; wrapX: boolean; width: number; noisy: boolean;
+  frames: SliceFrame[];
 }
 
-interface RawFrame { f: number; t: string; x: string; bilinear: string; nearest: string }
+interface RawFrame {
+  f: number; t: string; x: string; bilinear: string; nearest: string;
+  nodes?: string; nodeRows?: number; nodeCols?: number;
+}
+interface RawNoise {
+  push: [number, number]; cols: string; colW: string; rows: string; rowW: string;
+}
 interface RawFixture {
   volumes: Record<string, { shape: [number, number, number]; rgb?: string }>;
   slices: { name: string; volume: string; wrap: boolean; wrapX: boolean; width: number;
-            frames: RawFrame[] }[];
+            noise?: RawNoise; frames: RawFrame[] }[];
 }
 
 function bytes(base64: string): Uint8Array {
@@ -33,6 +41,7 @@ function bytes(base64: string): Uint8Array {
 }
 
 const float64 = (base64: string) => new Float64Array(bytes(base64).buffer);
+const int32 = (base64: string) => new Int32Array(bytes(base64).buffer);
 
 /** The fixture's large clip, whose voxels are (t*131 + y*71 + x*37 + c*17 + (t*x) % 23) % 256. */
 function formulaClip(frames: number, height: number, width: number): Clip {
@@ -53,11 +62,24 @@ export const clips: Record<string, Clip> = Object.fromEntries(
     [name, rgb ? { frames, height, width, rgb: bytes(rgb) } : formulaClip(frames, height, width)]),
 );
 
+function noise(raw: RawNoise, frame: RawFrame): SliceFrame["noise"] {
+  return {
+    push: raw.push,
+    grid: {
+      nodes: float64(frame.nodes!), nodeRows: frame.nodeRows!, nodeCols: frame.nodeCols!,
+      cols: int32(raw.cols), colW: float64(raw.colW),
+      rows: int32(raw.rows), rowW: float64(raw.rowW),
+    },
+  };
+}
+
 export const sliceCases: SliceCase[] = fixture.slices.map((c) => ({
   name: c.name, clip: clips[c.volume], wrap: c.wrap, wrapX: c.wrapX, width: c.width,
+  noisy: c.noise !== undefined,
   frames: c.frames.map((frame) => ({
     f: frame.f,
     columns: { t: float64(frame.t), x: float64(frame.x) },
+    noise: c.noise && noise(c.noise, frame),
     bilinear: bytes(frame.bilinear),
     nearest: bytes(frame.nearest),
   })),
@@ -101,29 +123,41 @@ export class Tally {
   pixels = 0; pixelsIdentical = 0;
   maxDiff = 0;
   translucent = 0;  // pixels whose alpha isn't 255
+  // Columns of the frames added with their width, and those most of whose pixels are more
+  // than 1 off.
+  columns = 0; wrongColumns = 0;
 
-  add(rgbaOut: Uint8Array, rgb: Uint8Array): void {
+  /** Add a frame; given its width, also check it column by column. */
+  add(rgbaOut: Uint8Array, rgb: Uint8Array, width?: number): void {
     if (rgbaOut.length / 4 !== rgb.length / 3)
       throw new Error(`${rgbaOut.length / 4} pixels, expected ${rgb.length / 3}`);
+    const off = new Uint32Array(width ?? 0);  // each column's pixels more than 1 off
     for (let p = 0; p < rgb.length / 3; p++) {
-      let same = true;
+      let same = true, most = 0;
       for (let c = 0; c < 3; c++) {
         const diff = Math.abs(rgbaOut[p * 4 + c] - rgb[p * 3 + c]);
         this.channels++;
         if (diff === 0) this.identical++;
         else same = false;
         if (diff <= 1) this.withinOne++;
-        this.maxDiff = Math.max(this.maxDiff, diff);
+        most = Math.max(most, diff);
       }
+      this.maxDiff = Math.max(this.maxDiff, most);
       this.pixels++;
       if (same) this.pixelsIdentical++;
       if (rgbaOut[p * 4 + 3] !== 255) this.translucent++;
+      if (width && most > 1) off[p % width]++;
     }
+    const rows = width ? rgb.length / 3 / width : 0;
+    this.columns += off.length;
+    for (const count of off) if (2 * count > rows) this.wrongColumns++;
   }
 
   get summary(): string {
     return `${percent(this.identical, this.channels)} of ${this.channels} channels identical, ` +
       `${percent(this.withinOne, this.channels)} within 1, ` +
-      `${percent(this.pixelsIdentical, this.pixels)} of pixels identical, max diff ${this.maxDiff}`;
+      `${percent(this.pixelsIdentical, this.pixels)} of pixels identical, ` +
+      `max diff ${this.maxDiff}` +
+      (this.columns ? `, ${this.wrongColumns} of ${this.columns} columns wrong` : "");
   }
 }
