@@ -211,6 +211,22 @@ def test_zero_noise_gives_the_flat_slice():
             assert np.array_equal(bumpy, render(volume, sweep, nearest))
 
 
+def test_noisy_column_sampler_matches_general_sampler():
+    # Whole-plane sweeps, so some points fall outside the video too.
+    for kind, angle in [("rotate", 30), ("rotate", 120), ("shear", 20)]:
+        for direction in ["time", "perpendicular"]:
+            noise = Noise(1.5, size=3.0, speed=0.6, direction=direction, seed=1)
+            sweep = timeslice.plan_sweep(T, W, kind, angle, noise=noise)
+            for f in range(sweep.frames):
+                t, x = sweep.at(f)
+                for nearest in [False, True]:
+                    fast = timeslice.sample_noisy_columns(
+                        volume, t, x, noise.push(sweep.normal), noise, f, nearest)
+                    slow = timeslice.sample(
+                        volume, *timeslice.surface(sweep, f, H, noise), nearest)
+                    assert np.array_equal(fast, slow), (kind, angle, direction, f)
+
+
 def test_time_noise_reads_each_pixel_earlier_or_later():
     # At 0 degrees pixel (y, x) of output frame f comes from frame f + 2 (the
     # room the noise needs), plus the noise.

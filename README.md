@@ -193,9 +193,10 @@ and some combinations don't fit:
   perpendicular noise and `--inside` it only fits at 0°.
 
 Previews and the live view shrink A and the size with the clip, so they show
-the same bumps as the full render. Noise makes sampling slower: on a 4-core
-machine a 1080p frame took about 130 ms to slice and encode, against 77 ms
-flat.
+the same bumps as the full render. Noise costs a little time: on a 4-core
+machine a 1080p frame took about 75–80 ms to slice and encode, against about
+70 ms flat. Slicing alone took about 37 ms against 18; most of the difference
+is working out the noise.
 
 ## Code layout
 
@@ -214,8 +215,13 @@ flat.
 - `Noise` is the surface noise: `field(...)` gives its values over a frame,
   and `push(normal)` which way and how far they move a point.
 - `surface(...)` gives the (t, y, x) position of every pixel of a noisy
-  frame, and `slice_frame(...)` makes an output frame, with
-  `sample_columns` when the surface is flat and `sample` when it's bumpy.
+  frame, which `sample` can read.
+- `sample_noisy_columns(...)` is a faster way to read a noisy frame: it
+  works out the noise as it goes, and since each pixel stays in its row it
+  only blends across x and t, like `sample_columns`. It gives exactly what
+  `sample` gives at `surface`'s points.
+- `slice_frame(...)` makes an output frame, with `sample_columns` when the
+  surface is flat and `sample_noisy_columns` when it's bumpy.
 - `main()` handles decoding and encoding (via ffmpeg).
 
 `webapp.py` is the web server (Flask), and `web/` holds the page it serves.

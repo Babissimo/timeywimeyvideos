@@ -200,27 +200,33 @@ def _sample_points(volume, t, y, x, nearest, out):
                 out[i, j, c] = min(255, int(v + 0.5))
 
 
+@njit(cache=True, inline="always")  # a call per pixel would cost more than the read
+def _read_in_row(volume, tt, row, xx, nearest, out, j):
+    """Read the volume at (tt, row, xx) into out[row, j], blending across x
+    and t only, since row is a whole number."""
+    n_t, _, n_x, n_c = volume.shape
+    if not (-0.5 <= tt < n_t - 0.5 and -0.5 <= xx < n_x - 0.5):
+        out[row, j, :] = 0
+        return
+    t0, t1, ft = _neighbours(tt, n_t)
+    x0, x1, fx = _neighbours(xx, n_x)
+    if nearest:
+        ti = t1 if ft >= 0.5 else t0
+        xi = x1 if fx >= 0.5 else x0
+        out[row, j, :] = volume[ti, row, xi, :]
+        return
+    for c in range(n_c):
+        # Blend along x, then t: 4 voxels in all.
+        v = ((volume[t0, row, x0, c] * (1 - fx) + volume[t0, row, x1, c] * fx) * (1 - ft)
+             + (volume[t1, row, x0, c] * (1 - fx) + volume[t1, row, x1, c] * fx) * ft)
+        out[row, j, c] = min(255, int(v + 0.5))
+
+
 @njit(parallel=True, cache=True)
 def _sample_columns(volume, t, x, nearest, out):
-    n_t, n_y, n_x, n_c = volume.shape
-    for row in prange(n_y):
+    for row in prange(volume.shape[1]):
         for j in range(t.shape[0]):
-            tt, xx = t[j], x[j]
-            if not (-0.5 <= tt < n_t - 0.5 and -0.5 <= xx < n_x - 0.5):
-                out[row, j, :] = 0
-                continue
-            t0, t1, ft = _neighbours(tt, n_t)
-            x0, x1, fx = _neighbours(xx, n_x)
-            if nearest:
-                ti = t1 if ft >= 0.5 else t0
-                xi = x1 if fx >= 0.5 else x0
-                out[row, j, :] = volume[ti, row, xi, :]
-                continue
-            for c in range(n_c):
-                # Blend along x, then t: 4 voxels in all.
-                v = ((volume[t0, row, x0, c] * (1 - fx) + volume[t0, row, x1, c] * fx) * (1 - ft)
-                     + (volume[t1, row, x0, c] * (1 - fx) + volume[t1, row, x1, c] * fx) * ft)
-                out[row, j, c] = min(255, int(v + 0.5))
+            _read_in_row(volume, t[j], row, x[j], nearest, out, j)
 
 
 def sample(volume, t, y, x, nearest=False):
@@ -348,12 +354,48 @@ class Noise(NamedTuple):
         return self._replace(amplitude=self.amplitude * factor,
                              size=self.size * factor)
 
+    def _lattice(self, width, height, f):
+        """The hash, and where output frame f's columns, rows and position in
+        the sweep fall in the noise."""
+        return (_permutation(self.seed), np.arange(width) / self.size,
+                np.arange(height) / self.size, f * self.speed / self.size)
+
     def field(self, width, height, f):
         """The noise over output frame f, from -1 to 1, shape (height, width)."""
         out = np.empty((height, width))
-        _noise_grid(_permutation(self.seed), np.arange(width) / self.size,
-                    np.arange(height) / self.size, f * self.speed / self.size, out)
+        _noise_grid(*self._lattice(width, height, f), out)
         return out / NOISE_BOUND
+
+
+@njit(parallel=True, cache=True)
+def _sample_noisy_columns(volume, t, x, push_t, push_x, perm, us, vs, z,
+                          nearest, out):
+    for row in prange(volume.shape[1]):
+        # Work out the whole row's bumps before reading any of it: doing both
+        # in one loop is about a fifth slower.
+        bumps = np.empty(t.shape[0])
+        for j in range(t.shape[0]):
+            bumps[j] = _noise3(perm, us[j], vs[row], z) / NOISE_BOUND
+        for j in range(t.shape[0]):
+            _read_in_row(volume, t[j] + push_t * bumps[j], row,
+                         x[j] + push_x * bumps[j], nearest, out, j)
+
+
+def sample_noisy_columns(volume, t, x, push, noise, f, nearest=False):
+    """A faster sample() for column slices pushed off their plane by noise.
+
+    Output pixel (row, j) is read at time t[j] and position x[j], moved by
+    push (a (t, x) pair) times the noise at that pixel of output frame f.
+    It works out the noise as it reads, and since every pixel stays in its
+    own row, only blends across x and t (4 voxels, not 8). It gives exactly
+    what sample() would at surface()'s points.
+    """
+    height = volume.shape[1]
+    out = np.empty((height, len(t)) + volume.shape[3:], np.uint8)
+    _sample_noisy_columns(volume, np.asarray(t, np.float64), np.asarray(x, np.float64),
+                          float(push[0]), float(push[1]),
+                          *noise._lattice(len(t), height, f), nearest, out)
+    return out
 
 
 # Slice planning. Each function returns a Sweep: the output frame width, the
@@ -582,9 +624,11 @@ def surface(sweep, f, height, noise):
 def slice_frame(volume, sweep, f, noise=None, nearest=False):
     """Output frame f of a sweep through a (T, H, W, C) volume, pushed off its
     plane by the noise the sweep was planned with, if any."""
+    t, x = sweep.at(f)
     if noise is None:
-        return sample_columns(volume, *sweep.at(f), nearest)
-    return sample(volume, *surface(sweep, f, volume.shape[1], noise), nearest)
+        return sample_columns(volume, t, x, nearest)
+    return sample_noisy_columns(volume, t, x, noise.push(sweep.normal), noise, f,
+                                nearest)
 
 
 def main():
