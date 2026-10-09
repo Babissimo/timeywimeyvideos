@@ -158,10 +158,11 @@ describe("readMp4", () => {
     expect(read.tracks.get(1)).toEqual({
       handler: "vide", start: 0, edited: true, edit: { delay: 0, time: 1024, duration: 15360 },
       durations: [512, 512, 512, 1024], offsets: [1024, 0, 0, 512], reordered: true, dtsShift: 0,
+      counted: { samples: 4, duration: 2560 },
     });
     expect(read.tracks.get(2)).toEqual({
       handler: "soun", start: 0, edited: false, edit: null, durations: [], offsets: [],
-      reordered: false, dtsShift: 0,
+      reordered: false, dtsShift: 0, counted: { samples: 0, duration: 0 },
     });
     expect(read.tracks.get(3)).toMatchObject({ start: 500_000, edit: { delay: 7680, time: 0 } });
     expect(read.tracks.get(5)).toMatchObject({ start: null });
@@ -198,6 +199,75 @@ describe("readMp4", () => {
     const read = await readMp4(new Blob([box("ftyp", ascii("isom")), moov]), 1);
     expect(read.streams).toBe(1);
     expect(read.tracks.get(1)?.durations).toEqual([1, 1]);
+  });
+
+  describe("counts the samples in movie fragments as far as ffmpeg reads them", () => {
+    /** Default durations by track, as trex boxes give them. */
+    const mvex = (...defaults: [number, number][]) => box("mvex", concat(
+      ...defaults.map(([id, duration]) => full("trex", 0, u32(id), u32(1), u32(duration), u32(0), u32(0)))));
+    /** A track fragment of track `id`: its default duration, if it gives one, and its runs,
+     * each a sample count or the samples' own durations. */
+    const traf = (id: number, duration: number | null, ...runs: (number | number[])[]) => box("traf", concat(
+      box("tfhd", concat(new Uint8Array([0, 0, 0, duration === null ? 0 : 0x08]), u32(id),
+                         ...duration === null ? [] : [u32(duration)])),
+      ...runs.map((run) => typeof run === "number"
+        ? box("trun", concat(new Uint8Array(4), u32(run)))
+        : box("trun", concat(new Uint8Array([0, 0, 1, 0]), u32(run.length), ...run.map(u32)))),
+    ));
+    const moof = (...trafs: Bytes[]) => box("moof", concat(full("mfhd", 0, u32(1)), ...trafs));
+    const mdat = box("mdat", new Uint8Array(16));
+    const moov = (stts: [number, number][]) => box("moov", concat(
+      mvhd(1000), trak(1, "vide", 600, null, stts), trak(2, "soun", 48000, null, []),
+      mvex([1, 20], [2, 1024])));
+    /** A segment index of track 1 whose references, starting `gap` bytes after it, sum to `size`. */
+    const sidx = (size: number, gap = 0) => full("sidx", 0, u32(1), u32(600), u32(0), u32(gap),
+                                                 new Uint8Array([0, 0, 0, 1]), u32(size), u32(600), u32(0));
+    const fragments = [moof(traf(1, null, 3), traf(2, null, 5)), mdat,
+                       moof(traf(1, 25, 2, [21, 22]), traf(2, 512, [1024])), mdat];
+    const counted = async (...parts: Bytes[]) =>
+      (await readMp4(new Blob([box("ftyp", ascii("isom")), ...parts]), 1)).tracks.get(1)?.counted;
+    const after = (...parts: Bytes[]) => parts.reduce((sum, part) => sum + part.length, 0);
+
+    test("in every fragment, with the movie header's samples", async () => {
+      // The trex default, then the track fragment's, then the samples' own.
+      expect(await counted(moov([]), ...fragments))
+        .toEqual({ samples: 7, duration: 3 * 20 + 2 * 25 + 21 + 22 });
+      expect(await counted(moov([[2, 30]]), ...fragments)).toEqual({ samples: 9, duration: 60 + 153 });
+    });
+
+    test("past the fields before each duration", async () => {
+      // A base data offset and a sample description index before the default duration; a
+      // data offset and first sample flags before the samples, which have sizes and
+      // composition offsets besides, and in the second run no durations of their own.
+      const tfhd = box("tfhd", concat(new Uint8Array([0, 0, 0, 0x0b]), u32(1), bigEndian(1000, 8), u32(1),
+                                      u32(40)));
+      const trun = (flags: number, ...samples: number[][]) => box("trun", concat(
+        new Uint8Array([0, 0, flags >> 8, flags & 0xff]), u32(samples.length), u32(100), u32(0x2000000),
+        ...samples.flat().map(u32)));
+      const fragment = moof(box("traf", concat(tfhd, trun(0xb05, [31, 200, 0], [32, 200, 66]),
+                                               trun(0xa05, [200, 0]))));
+      expect(await counted(moov([]), fragment, mdat)).toEqual({ samples: 3, duration: 31 + 32 + 40 });
+    });
+
+    test("not for a track the movie header gives no defaults for", async () => {
+      const bare = box("moov", concat(mvhd(1000), trak(1, "vide", 600, null, [])));
+      expect(await counted(bare, ...fragments)).toEqual({ samples: 0, duration: 0 });
+    });
+
+    test("only before the first media data after a segment index that covers the file", async () => {
+      const covers = sidx(after(...fragments));
+      expect(await counted(moov([]), covers, ...fragments)).toEqual({ samples: 3, duration: 60 });
+      // An index closed by a movie fragment random access box covers the file too.
+      const mfra = box("mfra", full("mfro", 0, u32(24)));
+      expect(await counted(moov([]), covers, ...fragments, mfra)).toEqual({ samples: 3, duration: 60 });
+      // One that falls short, or starts after a gap, doesn't.
+      expect((await counted(moov([]), sidx(after(...fragments) - 1), ...fragments))?.samples).toBe(7);
+      expect((await counted(moov([]), sidx(after(...fragments) - 8, 8), ...fragments))?.samples).toBe(7);
+      // Media data holding none doesn't count.
+      const empty = box("mdat", new Uint8Array(0));
+      expect(await counted(moov([]), sidx(after(empty, ...fragments)), empty, ...fragments))
+        .toEqual({ samples: 3, duration: 60 });
+    });
   });
 
   test.each([

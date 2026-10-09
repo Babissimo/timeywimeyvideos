@@ -48,6 +48,10 @@ export interface Mp4Track {
   /** Whether the track has composition offsets, and how far ffmpeg moves its decode
    * timestamps back so that negative ones still show after decoding. */
   reordered: boolean; dtsShift: number;
+  /** For the track `readMp4` was asked to expand, the samples ffmpeg takes its average frame
+   * rate over: how many the movie header and the fragments it reads with it hold, and how
+   * long they last together, in the track's time scale. Zero for the others. */
+  counted: { samples: number; duration: number };
 }
 
 /** An edit that shows a track's media, in the track's time scale: it follows empty edits
@@ -337,7 +341,8 @@ function* boxesWithin(bytes: Uint8Array, base: number) {
 
 const fourcc = (name: string) => [...name].reduce((id, c) => id * 256 + c.charCodeAt(0), 0);
 const BOX = Object.fromEntries(
-  ["moov", "mvhd", "trak", "tkhd", "edts", "elst", "mdia", "mdhd", "hdlr", "minf", "stbl", "stts", "ctts"]
+  ["moov", "mvhd", "trak", "tkhd", "edts", "elst", "mdia", "mdhd", "hdlr", "minf", "stbl", "stts", "ctts",
+   "mvex", "trex", "moof", "traf", "tfhd", "trun", "sidx", "mdat"]
     .map((name) => [name, fourcc(name)]),
 ) as Record<string, number>;
 
@@ -348,28 +353,133 @@ interface Trak {
   edits: [number, number][] | null; stts: DataView | null; ctts: DataView | null;
 }
 
-/** Read the parts of an MP4 or QuickTime movie header that ffmpeg makes streams of, with
- * the samples of the track whose ID is `expand`. */
+/**
+ * Read the parts of an MP4 or QuickTime movie header that ffmpeg makes streams of, with
+ * the samples of the track whose ID is `expand`. The top level is read as far as ffmpeg
+ * reads it before probing: past the movie header and the first media data, and through any
+ * movie fragments, until a box ends the file or a segment index has covered it.
+ */
 export async function readMp4(source: Blob, expand?: number): Promise<Mp4Header> {
-  for await (const moov of boxes(source, 0, source.size)) {
-    if (moov.id !== BOX.moov) continue;
-    let movieScale = 0;
-    const traks: Trak[] = [];
-    for await (const part of boxes(source, moov.data, moov.end)) {
-      if (part.id === BOX.mvhd) movieScale = timescale(await read(source, part.data, part.end));
-      if (part.id === BOX.trak) traks.push(await readTrak(source, part));
+  let header: Mp4Header | undefined;
+  let defaults = new Map<number, number>();
+  let media = false;
+  let indexed = false;
+  for await (const top of boxes(source, 0, source.size)) {
+    if (top.id === BOX.moov && !header) {
+      let movieScale = 0;
+      const traks: Trak[] = [];
+      for await (const part of boxes(source, top.data, top.end)) {
+        if (part.id === BOX.mvhd) movieScale = timescale(await read(source, part.data, part.end));
+        if (part.id === BOX.trak) traks.push(await readTrak(source, part));
+        if (part.id === BOX.mvex) defaults = await fragmentDefaults(source, part);
+      }
+      let textStart: number | null = null;
+      const tracks = new Map<number, Mp4Track>();
+      for (const trak of traks) {
+        const track = mp4Track(trak, movieScale, trak.id === expand);
+        tracks.set(trak.id, track);
+        if (["vide", "soun"].includes(track.handler) || track.start === null) continue;
+        if (textStart === null || track.start < textStart) textStart = track.start;
+      }
+      header = { streams: traks.length, textStart, tracks };
+    } else if (header && top.id === BOX.moof && expand !== undefined) {
+      const counted = header.tracks.get(expand)?.counted;
+      const fallback = defaults.get(expand);
+      // ffmpeg passes over the fragments of a track the movie header gives no defaults for.
+      if (counted && fallback !== undefined) {
+        const { samples, duration } = fragmentSamples(await read(source, top.data, top.end), top.data,
+                                                      expand, fallback);
+        counted.samples += samples;
+        counted.duration += duration;
+      }
+    } else if (header && top.id === BOX.sidx) {
+      indexed ||= await indexesFile(source, top, header.tracks);
     }
-    let textStart: number | null = null;
-    const tracks = new Map<number, Mp4Track>();
-    for (const trak of traks) {
-      const track = mp4Track(trak, movieScale, trak.id === expand);
-      tracks.set(trak.id, track);
-      if (["vide", "soun"].includes(track.handler) || track.start === null) continue;
-      if (textStart === null || track.start < textStart) textStart = track.start;
-    }
-    return { streams: traks.length, textStart, tracks };
+    // ffmpeg takes no notice of media data that holds none.
+    if (top.id === BOX.mdat && top.end > top.data) media = true;
+    if (header && media && (indexed || top.end === source.size)) break;
   }
-  throw new ContainerError("no movie header");
+  if (!header) throw new ContainerError("no movie header");
+  return header;
+}
+
+/** Each track's default sample duration in its fragments, by track ID, from an mvex box's
+ * trex boxes: the first for a track counts. */
+async function fragmentDefaults(source: Blob, mvex: Span): Promise<Map<number, number>> {
+  const bytes = await read(source, mvex.data, mvex.end);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const defaults = new Map<number, number>();
+  for (const trex of boxesWithin(bytes, mvex.data)) {
+    const at = trex.data - mvex.data;
+    // version and flags, track ID, sample description index, then the duration
+    if (trex.id !== BOX.trex || trex.end - trex.data < 16) continue;
+    const id = view.getUint32(at + 4);
+    if (!defaults.has(id)) defaults.set(id, view.getUint32(at + 12));
+  }
+  return defaults;
+}
+
+/** How many samples of track `id` a movie fragment's runs hold, and how long they last
+ * together: a sample without its own duration takes its track fragment's default, else
+ * `fallback`. `bytes` is the fragment's data, from file position `base`. */
+function fragmentSamples(bytes: Uint8Array, base: number, id: number,
+                         fallback: number): { samples: number; duration: number } {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let samples = 0;
+  let duration = 0;
+  for (const traf of boxesWithin(bytes, base)) {
+    if (traf.id !== BOX.traf) continue;
+    let ours = false;
+    let length = fallback;
+    for (const part of boxesWithin(bytes.subarray(traf.data - base, traf.end - base), traf.data)) {
+      const at = part.data - base;
+      const end = part.end - base;
+      if (end - at < 8) continue;
+      const flags = view.getUint32(at) & 0xffffff;
+      if (part.id === BOX.tfhd) {
+        ours = view.getUint32(at + 4) === id;
+        // A base data offset and a sample description index come before the default duration.
+        const field = at + 8 + (flags & 0x01 ? 8 : 0) + (flags & 0x02 ? 4 : 0);
+        length = flags & 0x08 && field + 4 <= end ? view.getUint32(field) : fallback;
+      } else if (part.id === BOX.trun && ours) {
+        const entries = view.getUint32(at + 4);
+        // Each sample's duration, size, flags and composition offset, as the flags say.
+        const size = 4 * [0x100, 0x200, 0x400, 0x800].filter((field) => flags & field).length;
+        const first = at + 8 + (flags & 0x01 ? 4 : 0) + (flags & 0x04 ? 4 : 0);
+        const n = size ? Math.min(entries, Math.max(0, Math.floor((end - first) / size))) : entries;
+        if (flags & 0x100) for (let i = 0; i < n; i++) duration += view.getUint32(first + i * size);
+        else duration += n * length;
+        samples += n;
+      }
+    }
+  }
+  return { samples, duration };
+}
+
+/** Whether a segment index lets ffmpeg stop reading the header at the next media data: it
+ * indexes one of the movie's tracks, and its references run on from its end to the end of
+ * the file, or to a movie fragment random access box closing it. */
+async function indexesFile(source: Blob, sidx: Span, tracks: Map<number, Mp4Track>): Promise<boolean> {
+  const bytes = await read(source, sidx.data, sidx.end);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const version = bytes[0];
+  // version and flags, reference ID, time scale, earliest presentation time, first offset
+  const fields = version === 1 ? 32 : 24;
+  if (bytes.length < fields || version > 1 || !tracks.has(view.getUint32(4))) return false;
+  const gap = version === 1 ? Number(view.getBigUint64(20)) : view.getUint32(16);
+  const count = view.getUint16(fields - 2);
+  let end = sidx.end + gap;
+  for (let i = 0; i < count; i++) {
+    const at = fields + 12 * i;
+    // ffmpeg doesn't follow a reference to another segment index.
+    if (at + 12 > bytes.length || view.getUint32(at) & 0x80000000) return false;
+    end += view.getUint32(at);
+  }
+  if (gap !== 0 || count === 0) return false;
+  if (end === source.size) return true;
+  if (source.size < 4) return false;
+  const tail = await read(source, source.size - 4, source.size);
+  return end === source.size - new DataView(tail.buffer, tail.byteOffset).getUint32(0);
 }
 
 /** A movie or media header's time scale, after its version, flags and times (4 or 8 bytes each). */
@@ -441,6 +551,7 @@ function mp4Track(trak: Trak, movieScale: number, expand: boolean): Mp4Track {
 
   let durations: number[] = [];
   let offsets: number[] = [];
+  const counted = { samples: 0, duration: 0 };
   if (expand && stts) {
     durations = expandRuns(stts, false, Infinity);
     offsets = ctts ? expandRuns(ctts, true, durations.length) : [];
@@ -448,8 +559,11 @@ function mp4Track(trak: Trak, movieScale: number, expand: boolean): Mp4Track {
     const given = offsets.length;
     offsets.length = durations.length;
     offsets.fill(0, given);
+    // ffmpeg counts the table's samples only if they last at all.
+    const duration = durations.reduce((sum, d) => sum + d, 0);
+    if (duration > 0) Object.assign(counted, { samples: durations.length, duration });
   }
-  return { handler, start, edited, edit, durations, offsets, reordered, dtsShift };
+  return { handler, start, edited, edit, durations, offsets, reordered, dtsShift, counted };
 }
 
 async function readTrak(source: Blob, trak: Span): Promise<Trak> {
