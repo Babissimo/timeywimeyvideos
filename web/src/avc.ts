@@ -1,9 +1,11 @@
 /**
- * Marking an H.264 stream's colour in its sequence parameter sets (SPS), for encoders that
- * leave it out. A decoder that finds no colour description in the stream guesses one, by the
- * picture's size, and a guess of BT.601 for a picture marked BT.709 in its MP4 shifts every
- * colour. Field names follow the H.264 standard's syntax tables (7.3.2.1.1 and E.1.1).
+ * Reading and marking an H.264 stream's sequence parameter sets (SPS): the frame rate one
+ * declares, and its colour, marked for encoders that leave it out. A decoder that finds no
+ * colour description in the stream guesses one, by the picture's size, and a guess of BT.601
+ * for a picture marked BT.709 in its MP4 shifts every colour. Field names follow the H.264
+ * standard's syntax tables (7.3.2.1.1 and E.1.1).
  */
+import type { Rate } from "./types";
 
 /** The colour description a VUI carries, as H.264's Table E-3, E-4 and E-5 number them. */
 export interface Colour { primaries: number; transfer: number; matrix: number; fullRange: boolean }
@@ -14,8 +16,8 @@ export const BT709: Colour = { primaries: 1, transfer: 1, matrix: 1, fullRange: 
 // The profiles whose SPS has chroma format, bit depth and scaling matrix fields.
 const HIGH_PROFILES = new Set([100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135]);
 
-/** An SPS's payload without the bytes that keep start codes out of it. */
-function unescape(nal: Uint8Array): Uint8Array {
+/** A parameter set's payload without the bytes that keep start codes out of it. */
+export function unescape(nal: Uint8Array): Uint8Array {
   const out: number[] = [];
   let zeros = 0;
   for (const byte of nal) {
@@ -44,13 +46,14 @@ function escape(rbsp: number[]): number[] {
   return out;
 }
 
-class Bits {
+/** Reads a parameter set's payload bit by bit, as H.264 and HEVC code it. */
+export class Bits {
   at = 0;
   constructor(readonly data: Uint8Array) {}
 
   bit(): number {
     const byte = this.data[this.at >> 3];
-    if (byte === undefined) throw new RangeError("the SPS ends early");
+    if (byte === undefined) throw new RangeError("the parameter set ends early");
     return (byte >> (7 - (this.at++ & 7))) & 1;
   }
 
@@ -58,6 +61,10 @@ class Bits {
     let value = 0;
     for (let i = 0; i < n; i++) value = value * 2 + this.bit();
     return value;
+  }
+
+  skip(n: number): void {
+    this.at += n;
   }
 
   ue(): number {
@@ -210,6 +217,31 @@ export function spsColour(nal: Uint8Array): Colour | null {
   const fullRange = Boolean(bits.u(1));
   if (!bits.u(1)) return null;
   return { primaries: bits.u(8), transfer: bits.u(8), matrix: bits.u(8), fullRange };
+}
+
+/** The frame rate an SPS NAL unit's VUI declares, time_scale over twice num_units_in_tick
+ * as ffmpeg's decoder takes it, unreduced; null if it declares none. */
+export function spsFrameRate(nal: Uint8Array): Rate | null {
+  const rbsp = unescape(nal.subarray(1));
+  const { signal } = layout(rbsp);
+  if (!signal) return null;
+  const bits = new Bits(rbsp);
+  bits.at = signal[1];
+  if (bits.u(1)) {  // chroma_loc_info_present_flag
+    bits.ue();
+    bits.ue();
+  }
+  if (!bits.u(1)) return null;  // timing_info_present_flag
+  const units = bits.u(32);
+  const scale = bits.u(32);
+  return units && scale ? { num: scale, den: 2 * units } : null;
+}
+
+/** The frame rate the first SPS of an AVCDecoderConfigurationRecord declares, as `spsFrameRate`. */
+export function avcFrameRate(record: Uint8Array): Rate | null {
+  if (!(record[5] & 0x1f)) return null;
+  const length = (record[6] << 8) | record[7];
+  return spsFrameRate(record.subarray(8, 8 + length));
 }
 
 /**

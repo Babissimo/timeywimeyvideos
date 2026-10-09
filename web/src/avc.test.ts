@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { BT709, markColour, markSps, spsColour, type Colour } from "./avc";
+import { avcFrameRate, BT709, markColour, markSps, spsColour, spsFrameRate, type Colour } from "./avc";
 
 const hex = (text: string) => Uint8Array.from(text.match(/../g)!, (h) => parseInt(h, 16));
 
@@ -15,6 +15,10 @@ const SPS = {
   escaped: "67640028acd9406c0227b9610000030001000003003c0f183196",
   // x264's, cut short before its VUI.
   noVui: "6764000aacd94479",
+  // x264 at 30000/1001 fps.
+  ntsc: "6764000dacd94141fb011000003e90000ea600f1429960",
+  // Apple's VideoToolbox encoder: a VUI without timing.
+  videoToolbox: "2764000dac5230507ec05a8101011856bdef8080",
 };
 
 const BT601: Colour = { primaries: 6, transfer: 6, matrix: 6, fullRange: true };
@@ -81,6 +85,27 @@ describe("markSps", () => {
     expect(after.slice(0, vui)).toBe(before.slice(0, vui));
     expect(after.slice(vui)).toBe("1" + "00" + "1" + "101" + "0" + "1" + "00000001".repeat(3)
                                   + "000000");
+  });
+});
+
+describe("spsFrameRate", () => {
+  // As ffmpeg's trace_headers reads the timing: time_scale over twice num_units_in_tick.
+  test("reads the rate an SPS declares, unreduced", () => {
+    expect(spsFrameRate(hex(SPS.escaped))).toEqual({ num: 60, den: 2 });
+    expect(spsFrameRate(hex(SPS.ntsc))).toEqual({ num: 60000, den: 2002 });
+  });
+
+  test("finds none in an SPS without timing", () => {
+    for (const sps of [SPS.noColour, SPS.bt709, SPS.srgb, SPS.noVui, SPS.videoToolbox]) {
+      expect(spsFrameRate(hex(sps))).toBeNull();
+    }
+  });
+
+  test("reads a decoder configuration record's first SPS", () => {
+    const record = (...sets: Uint8Array[]) => Uint8Array.from(
+      [1, 0x64, 0, 0x0d, 0xff, 0xe0 | sets.length, ...sets.flatMap((sps) => [0, sps.length, ...sps])]);
+    expect(avcFrameRate(record(hex(SPS.ntsc), hex(SPS.escaped)))).toEqual({ num: 60000, den: 2002 });
+    expect(avcFrameRate(record())).toBeNull();
   });
 });
 
