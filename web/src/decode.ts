@@ -7,7 +7,9 @@ import {
   ALL_FORMATS, BlobSource, EncodedPacketSink, Input, IsobmffInputFormat, MatroskaInputFormat,
   UnsupportedInputFormatError, VideoSample, VideoSampleSink, type InputTrack, type InputVideoTrack,
 } from "mediabunny";
+import { avcFrameRate } from "./avc";
 import { readMatroska, readMp4, type Mp4Track } from "./container";
+import { hevcFrameRate } from "./hevc";
 import { gcd, limitDenominator, roundHalfEven } from "./pymath";
 import type { Rate } from "./types";
 
@@ -226,7 +228,8 @@ interface Packets {
   first: number; last: number; hidden: boolean[];
   /** How far before its target an MP4 seek compares decode timestamps. */
   seekBack: number;
-  /** ffprobe's r_frame_rate, from which ffmpeg's demuxer makes up a missing packet duration. */
+  /** ffprobe's r_frame_rate, or the rate that stands in for a time base taken as one, from
+   * which ffmpeg's demuxer makes up a missing packet duration. */
   rFrameRate: Rate;
   /** When the file starts, in microseconds: its streams' earliest first timestamp. */
   fileStart: bigint;
@@ -269,11 +272,22 @@ async function readPackets(clip: Clip, all: boolean, signal?: AbortSignal): Prom
     let starts: Map<number, Mp4Track> | undefined;
     let index: MovIndex | undefined;
     let seekBack = 0;
-    let defaultDuration: number | null = null;
+    // The rate a Matroska track's default duration gives.
+    let defaultRate: Rate | null = null;
+    // ffmpeg's avg_frame_rate: an MP4's over the samples its header and the fragments read
+    // with it hold, a Matroska track's its default duration's. Other containers' is not modelled.
+    let average: Rate | null = null;
     if (isobmff) {
       const header = await readMp4(source, track.id);
       const video = header.tracks.get(track.id);
       ({ streams, textStart, tracks: starts } = header);
+      const counted = video?.counted;
+      if (counted && counted.samples > 0 && counted.duration > 0) {
+        average = avReduce(BigInt(Math.round(resolution)) * BigInt(counted.samples), BigInt(counted.duration),
+                           INT_MAX);
+      }
+      // Packets last as their samples do. ffmpeg parses VP8 and VP9 in full, which drops the
+      // durations; that is not modelled.
       if (video && video.durations.length === pts.length) {
         index = movIndex(video, keys);
         lengths = video.durations;
@@ -289,7 +303,8 @@ async function readPackets(clip: Clip, all: boolean, signal?: AbortSignal): Prom
     } else if (format instanceof MatroskaInputFormat) {
       const header = await readMatroska(source);
       ({ streams, textStart } = header);
-      defaultDuration = header.defaultDurations.get(track.id) ?? null;
+      const defaultDuration = header.defaultDurations.get(track.id) ?? null;
+      if (defaultDuration) average = defaultRate = avReduce(1_000_000_000n, BigInt(defaultDuration), 30000n);
       // Blocks take the track's default duration, cut to whole ticks. In ffmpeg a block's
       // own BlockDuration, which a remux of variable-rate video writes, overrides it; Mediabunny
       // doesn't report that, so here the default stands.
@@ -306,17 +321,28 @@ async function readPackets(clip: Clip, all: boolean, signal?: AbortSignal): Prom
     const rateDts = index ? dts.slice(first, last + 1)
       : isobmff || pts.length <= RATE_PACKETS ? dts : decodeTimestamps(pts.slice(0, RATE_PACKETS));
     const codec = await track.getCodec();
-    const rFrameRate = frameRate(rateDts, lengths.slice(first, last + 1), resolution,
-                                 index?.table ?? null, defaultDuration, codec);
-    // ffmpeg paces decoded frames to av_guess_frame_rate: r_frame_rate, or the average rate
-    // where that is under 70 fps and r_frame_rate over 210. An MP4's average is over its
-    // sample table; other containers' is not modelled.
-    let fps = rFrameRate;
-    const total = index ? lengths.reduce((sum, d) => sum + d, 0) : 0;
-    if (total > 0 && rFrameRate.num > 210 * rFrameRate.den) {
-      const average = avReduce(BigInt(Math.round(resolution)) * BigInt(lengths.length), BigInt(total), INT_MAX);
-      if (average.num < 70 * average.den) fps = average;
+    const found = frameRate(rateDts, lengths.slice(first, last + 1), resolution, index?.table ?? null,
+                            defaultRate, codec);
+    // Finding none, ffmpeg takes the rate the codec declares (doubled for H.264, which counts
+    // fields) where the time base can tell its frames apart, and failing that the time base.
+    const declared = found ? null : await declaredRate(track, codec);
+    const fields = declared && codec === "avc" ? multiply(declared, { num: 2, den: 1 }) : declared;
+    const base = Math.round(resolution);
+    const byTimeBase = !found && !(fields && fields.num <= base * fields.den);
+    let rFrameRate = found ?? (byTimeBase ? { num: base, den: 1 } : fields!);
+    // ffmpeg paces decoded frames to av_guess_frame_rate: r_frame_rate, or the average where
+    // that is under 70 fps and r_frame_rate over 210.
+    const toAverage = average !== null && rFrameRate.num > 210 * rFrameRate.den
+      && average.num < 70 * average.den;
+    // A time base over 210 Hz is no frame rate. Where ffmpeg, and so load_video, would pace to
+    // one for want of anything else, the mean rate of the decode timestamps read stands in,
+    // for the packet durations ffmpeg makes up too.
+    if (byTimeBase && !toAverage && base > 210) {
+      const span = (rateDts[rateDts.length - 1] ?? 0) - (rateDts[0] ?? 0);
+      rFrameRate = span > 0 ? limitDenominator((rateDts.length - 1) * resolution / span, 1001)
+                            : { num: 25, den: 1 };
     }
+    const fps = toAverage ? average! : rFrameRate;
     const fileStart = await startOf(tracks, isobmff, textStart, starts);
 
     const rotation = await track.getRotation();
@@ -356,7 +382,8 @@ interface Timeline {
   fileStart: bigint;
   /** How far before its target an MP4 seek compares decode timestamps. */
   seekBack: number;
-  /** ffprobe's r_frame_rate, from which ffmpeg's demuxer makes up a missing packet duration. */
+  /** ffprobe's r_frame_rate, or the rate that stands in for a time base taken as one, from
+   * which ffmpeg's demuxer makes up a missing packet duration. */
   rFrameRate: Rate;
   /** In presentation order: when ffmpeg shows each frame, the timestamp its decoded sample
    * carries here, its packet's duration (0 if the container gives none) and its place in
@@ -645,7 +672,7 @@ function chooseFrames(timeline: Timeline, rate: Rate, start?: number, duration?:
   const timed: Timed[] = [];
   if (rate.num === fps.num && rate.den === fps.den) {
     // Without the fps filter ffmpeg paces to av_guess_frame_rate. Its switch to an H.264
-    // or HEVC stream's declared rate is not modelled.
+    // stream's declared rate, which timeslice.probe can't see, is not modelled.
     // In output frames to 1/2^bits of a frame (2^bits × fps.num within 2^29, bits at
     // most 16), then 2^-17 further from 0 unless whole, as ffmpeg times them.
     const bits = Math.min(Math.max(29 - Math.floor(Math.log2(fps.num)), 0), 16);
@@ -716,38 +743,57 @@ function pace(frames: Timed[], singleStream: boolean): number[] {
 }
 
 /**
- * The frame rate ffprobe calls r_frame_rate. An MP4 whose sample table (`table`, each
- * sample's decode timestamp) has every sample in the index but the last lasting as long
- * as the first gives it exactly; a Matroska track's default duration gives it; otherwise,
- * for H.264 and HEVC and for time bases finer than 1/100 s, it is estimated from decode
- * timestamps: as ffmpeg reads an MP4's header, from the first 99 samples in its table
- * (taken only for a time base finer than 1/100 s or coarser than 1/5 s), then from the
- * packets read while probing (`dts` and `lengths`), the first 20 frame steps of them (40
- * for a time base coarser than 0.5 ms). The estimate is the greatest common step if every
- * step after the third shares one, else the standard rate whose ticks the timestamps fall
- * on most evenly. Failing that ffmpeg takes the codec's declared rate if it has one, which
- * this does not read, and else the time base: the mean rate stands in where that would be
- * absurd.
+ * The frame rate ffprobe calls r_frame_rate, where ffmpeg finds one in the container or the
+ * timestamps; null where it doesn't. An MP4 whose sample table (`table`, each sample's
+ * decode timestamp) has every sample in the index but the last lasting as long as the first
+ * gives it exactly; so does the rate a Matroska track's default duration gives (`defaultRate`),
+ * between 5 and 1000 fps; otherwise, for H.264 and HEVC and for time bases finer than
+ * 1/100 s or coarser than 1/5 s, it is estimated from decode timestamps: as ffmpeg reads an
+ * MP4's header, from the first 99 samples in its table (taken only for such a time base),
+ * then from the packets read while probing (`dts` and `lengths`), the first 20 frame steps of
+ * them (40 for a time base coarser than 0.5 ms). The estimate is the greatest common step if
+ * every step after the third shares one, else the standard rate whose ticks the timestamps
+ * fall on most evenly.
  */
 function frameRate(dts: number[], lengths: number[], resolution: number, table: number[] | null,
-                   defaultDuration: number | null, codec: string | null): Rate {
+                   defaultRate: Rate | null, codec: string | null): Rate | null {
   if (table && lengths[0]! > 0 && lengths.slice(1, -1).every((d) => d === lengths[0])) {
     return avReduce(BigInt(Math.round(resolution)), BigInt(lengths[0]!), INT_MAX);
   }
-  if (defaultDuration !== null && defaultDuration > 0) {
-    const rate = avReduce(1_000_000_000n, BigInt(defaultDuration), 30000n);
-    if (rate.num < rate.den * 1000 && rate.num > rate.den * 5) return rate;
+  if (defaultRate && defaultRate.num < defaultRate.den * 1000 && defaultRate.num > defaultRate.den * 5) {
+    return defaultRate;
   }
   const unreliableBase = resolution >= 101 || resolution < 5;
-  if (!unreliableBase && codec !== "avc" && codec !== "hevc") return { num: Math.round(resolution), den: 1 };
+  if (!unreliableBase && codec !== "avc" && codec !== "hevc") return null;
   // Reading the header, ffmpeg knows no codec yet, so judges by the time base alone. It
   // carries the common step found there into the probe.
   const header = table ? standardRate(table.slice(0, 99), resolution) : { rate: null, common: 0 };
-  const found = (unreliableBase ? header.rate : null)
-    ?? standardRate(dts, resolution, lengths, header.common).rate;
-  if (found) return found;
-  const span = (dts[dts.length - 1] ?? 0) - (dts[0] ?? 0);
-  return span > 0 ? limitDenominator((dts.length - 1) * resolution / span, 1001) : { num: 25, den: 1 };
+  return (unreliableBase ? header.rate : null) ?? standardRate(dts, resolution, lengths, header.common).rate;
+}
+
+/**
+ * The frame rate an H.264 or HEVC stream declares in the parameter sets of its decoder
+ * configuration, reduced as ffmpeg's decoder takes it; null if it declares none. Parameter
+ * sets carried only in the packets, and other codecs' declared rates, are not read: VP8 and
+ * VP9 have none, and AV1's timing info is seldom written.
+ */
+async function declaredRate(track: InputVideoTrack, codec: string | null): Promise<Rate | null> {
+  if (codec !== "avc" && codec !== "hevc") return null;
+  let rate: Rate | null;
+  try {
+    const description = (await track.getDecoderConfig())?.description;
+    if (!description) return null;
+    const record = ArrayBuffer.isView(description)
+      ? new Uint8Array(description.buffer, description.byteOffset, description.byteLength)
+      : new Uint8Array(description);
+    rate = codec === "avc" ? avcFrameRate(record) : hevcFrameRate(record);
+  } catch {
+    return null;  // parameter sets that can't be read declare nothing
+  }
+  if (!rate) return null;
+  // ffmpeg reduces the frame's duration to terms within 2^30.
+  const period = avReduce(BigInt(rate.den), BigInt(rate.num), 1n << 30n);
+  return { num: period.den, den: period.num };
 }
 
 // ffmpeg's standard frame rates, as multiples of 1/12012 fps: twelfths up to
