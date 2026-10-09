@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """A local web front end for timeslice.py.
 
+    npm install && npm run build    # once, and after changing the page
     python webapp.py --videos ~/Movies
 
 then open http://127.0.0.1:8000. Pick a video from that folder or upload one,
 drag the angle and watch the slice play live, then render it.
 
-The live view slices a half-size copy of the clip held in memory, the same way
-`timeslice.py --preview` does, so what it shows is what a preview render
-makes. Renders run timeslice.py itself in a separate process, and land in
-renders/; uploads are saved in uploads/.
+The page (web/, built into web/dist/) plays the live view itself: it decodes a
+half-size copy of the clip in the browser and slices it on the GPU, the same
+way `timeslice.py --preview` does, so what it shows is what a preview render
+makes. This server offers the videos and takes uploads, saved in uploads/.
+Renders run timeslice.py itself in a separate process, and land in renders/.
 """
 
 import argparse
 import functools
-import json
 import math
 import os
 import re
@@ -27,7 +28,6 @@ from fractions import Fraction
 from pathlib import Path
 from urllib.parse import unquote
 
-import numpy as np
 from flask import Flask, Response, abort, jsonify, request, send_from_directory
 from werkzeug.utils import secure_filename
 
@@ -35,9 +35,12 @@ import timeslice
 
 HERE = Path(__file__).resolve().parent
 VIDEO_TYPES = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".gif"}
-LIVE_LIMIT_GB = 2  # refuse live clips that would take more memory than this
+PAGE = HERE / "web" / "dist"  # the page, as `npm run build` makes it
+NOT_BUILT = ("The page isn't built yet. Run `npm install` and then `npm run build` beside "
+             "webapp.py, and reload. While working on the page, `npm run dev` serves it "
+             "instead.\n")
 
-app = Flask(__name__, static_folder=str(HERE / "web"), static_url_path="/static")
+app = Flask(__name__, static_folder=None)
 folders = {  # where sources come from and renders go; main() can change these
     "videos": HERE / "videos",
     "uploads": HERE / "uploads",
@@ -133,11 +136,19 @@ def media(kind, name):
 
 @app.get("/")
 def index():
-    return send_from_directory(app.static_folder, "index.html")
+    if not (PAGE / "index.html").is_file():
+        return Response(NOT_BUILT, 503, mimetype="text/plain")
+    # Never cached: it names the current build's files.
+    return send_from_directory(PAGE, "index.html", max_age=0)
 
 
-# Options, from the live view's query string or a render request's JSON body,
-# in timeslice.py's terms.
+@app.get("/<path:name>")
+def page(name):
+    """The page's scripts and styles, at the paths the build gave them."""
+    return send_from_directory(PAGE, name)
+
+
+# Options, from a render request's JSON body, in timeslice.py's terms.
 
 def read_options(values):
     def number(name, default=None, low=-math.inf, above=None):
@@ -202,144 +213,6 @@ def read_options(values):
                 fps=fps, loop=loop, sides=sides,
                 loop_fade=number("loop_fade", 0.0, low=0) if loop else 0.0,
                 side_fade=number("loop_side_fade", 0.0, low=0) if sides else 0.0)
-
-
-def live_noise(opts):
-    """The noise for the live view's half-size clip."""
-    return opts["noise"] and opts["noise"].scaled(timeslice.PREVIEW_SCALE)
-
-
-def plan(n_frames, width, opts, noise=None):
-    """Plan the sweep, with `noise` scaled to match the clip."""
-    try:
-        return timeslice.plan_sweep(n_frames, width, opts["slice"], opts["angle"],
-                                    opts["inside"], opts["motion"], noise,
-                                    opts["loop"], opts["sides"])
-    except timeslice.DoesNotFit as err:
-        if opts["loop"]:  # only sideways noise can leave a loop's frame
-            raise Problem(f"{err} Use less noise, push it through time, or wrap "
-                          "round the sides too.", kind="sideways")
-        smaller = "a smaller angle or less noise" if noise else "a smaller angle"
-        raise Problem(f"{err} Use a longer clip or {smaller}, or choose "
-                      "Let black in or Wrap round at the video's edges.",
-                      kind="does_not_fit")
-    except ValueError as err:
-        raise Problem(str(err))
-
-
-def loop_fades(n_frames, width, rate, opts, shrink=1.0):
-    """How many frames and columns the loop's crossfades blend, for a clip
-    of n_frames at this frame rate, `width` pixels wide once shrunk by
-    `shrink`."""
-    frames = round(opts["loop_fade"] * rate)
-    columns = round(opts["side_fade"] * shrink)
-    if 2 * frames > n_frames:
-        raise Problem("The crossfade at the ends can be at most half the clip, "
-                      f"{n_frames / 2 / rate:.3g} s.")
-    if 2 * columns > width:
-        raise Problem("The crossfade at the sides can be at most half the width, "
-                      f"{width / shrink / 2:g} pixels.")
-    return frames, columns
-
-
-# The live view. numba's parallel loops mustn't be entered from two threads
-# at once (some of its threading back ends abort the process), so one lock
-# covers loading the clip and every call into the sampler.
-
-live_lock = threading.Lock()
-live = {"key": None, "volume": None, "fps": None}
-
-
-def live_clip(path, opts):
-    """The half-size clip for these options, loading it if it changed, with
-    the loop's crossfades done. Call with live_lock held."""
-    key = (str(path), path.stat().st_mtime, opts["scale"], opts["start"],
-           opts["duration"], opts["loop_fade"], opts["side_fade"])
-    if live["key"] != key:
-        shrink = timeslice.PREVIEW_SCALE
-        width, height, fps, length = probe(path)
-        seconds = timeslice.clip_seconds(length, opts["start"], opts["duration"])
-        if seconds is not None:
-            size = (seconds * fps * shrink * round(width * opts["scale"] * shrink)
-                    * round(height * opts["scale"] * shrink) * 3)
-            if size > LIVE_LIMIT_GB * 1e9:
-                raise Problem(
-                    f"The live view would need {size / 1e9:.1f} GB of memory for "
-                    f"this clip (the limit is {LIVE_LIMIT_GB} GB). Set a shorter "
-                    "duration or a smaller scale.")
-            # Refuse fades that plainly don't fit before decoding the clip.
-            loop_fades(round(seconds * fps * shrink), round(width * opts["scale"] * shrink),
-                       float(fps) * shrink, opts, shrink)
-        live.update(key=None, volume=None, fps=None)  # let the old clip go first
-        try:
-            volume, fps = timeslice.load_video(str(path), opts["scale"] * shrink,
-                                               shrink, opts["start"],
-                                               opts["duration"], fast=True)
-        except timeslice.VideoError as err:
-            raise Problem(str(err), 422)
-        # The fades work in place, so a change to them loads the clip afresh.
-        frames, columns = loop_fades(len(volume), volume.shape[2], float(fps) * shrink,
-                                     opts, shrink)
-        volume = timeslice.crossfade(timeslice.crossfade(volume, frames), columns, axis=2)
-        live.update(key=key, volume=volume, fps=fps)
-    return live["volume"], live["fps"]
-
-
-def endpoints(sweep, f):
-    """Where output frame f's first and last columns come from: [t0, x0, t1, x1]."""
-    t, x = sweep.at(f)
-    return [float(t[0]), float(x[0]), float(t[-1]), float(x[-1])]
-
-
-def full_size(path, opts):
-    """Roughly what a full-quality render with these options would make."""
-    width, height, fps, length = probe(path)
-    seconds = timeslice.clip_seconds(length, opts["start"], opts["duration"])
-    if seconds is None:
-        return None
-    width = max(1, round(width * opts["scale"]))
-    height = max(1, round(height * opts["scale"]))
-    n_frames = max(1, round(seconds * fps))
-    try:
-        frames, columns = loop_fades(n_frames, width, float(fps), opts)
-        sweep = plan(n_frames - frames, width - columns, opts, opts["noise"])
-    except Problem as err:
-        return dict(error=str(err))
-    out_fps = Fraction(opts["fps"]) if opts["fps"] else fps
-    return dict(width=sweep.width, height=height, frames=sweep.frames,
-                seconds=float(sweep.frames / out_fps),
-                memory=n_frames * height * width * 3)
-
-
-@app.get("/api/frame")
-def frame():
-    """One output frame of the live preview, as raw RGB bytes. The X-Info
-    header describes it and the sweep it belongs to, as JSON."""
-    path = source_path(request.args.get("source"))
-    opts = read_options(request.args)
-    try:
-        pos = min(max(float(request.args.get("pos", 0)), 0.0), 1.0)
-    except ValueError:
-        pos = 0.0
-    noise = live_noise(opts)
-    with live_lock:
-        volume, fps = live_clip(path, opts)
-        n_frames, height, width, _ = volume.shape
-        sweep = plan(n_frames, width, opts, noise)
-        f = round(pos * (sweep.frames - 1))
-        image = timeslice.slice_frame(volume, sweep, f, noise, nearest=True)
-    out_fps = (Fraction(opts["fps"]) if opts["fps"] else fps) * \
-        Fraction(timeslice.PREVIEW_SCALE)
-    details = dict(
-        width=sweep.width, height=height, frames=sweep.frames, frame=f,
-        fps=float(out_fps), seconds=float(sweep.frames / out_fps),
-        volume=[n_frames, height, width], memory=volume.nbytes,
-        loop=sweep.loop, sides=sweep.sides,
-        line=endpoints(sweep, f), first=endpoints(sweep, 0),
-        last=endpoints(sweep, sweep.frames - 1), full=full_size(path, opts))
-    return Response(image.tobytes(), mimetype="application/octet-stream",
-                    headers={"X-Info": json.dumps(details),
-                             "Cache-Control": "no-store"})
 
 
 # Renders: one at a time, each running timeslice.py in its own process so it
@@ -517,19 +390,6 @@ def renders():
                          modified=p.stat().st_mtime) for p in files])
 
 
-def warm_up():
-    """Load numba's compiled samplers and noise now, so the first live frame
-    is quick."""
-    volume = np.zeros((2, 2, 2, 3), np.uint8)
-    narrowed = volume[:, :, :1]  # what a crossfade at the sides leaves
-    noise = timeslice.Noise(0.1)
-    with live_lock:
-        for clip in [volume, narrowed]:
-            timeslice.slice_frame(clip, timeslice.plan_sweep(2, 2), 0, nearest=True)
-            timeslice.slice_frame(clip, timeslice.plan_sweep(2, 2, noise=noise), 0,
-                                  noise, nearest=True)
-
-
 def main():
     parser = argparse.ArgumentParser(description="Web front end for timeslice.py")
     parser.add_argument("--videos", default=str(folders["videos"]),
@@ -544,7 +404,8 @@ def main():
         folders["videos"].mkdir(exist_ok=True)
     if not folders["videos"].is_dir():
         sys.exit(f"{folders['videos']} isn't a folder")
-    threading.Thread(target=warm_up, daemon=True).start()
+    if not (PAGE / "index.html").is_file():
+        print(NOT_BUILT, end="")
     print(f"Offering videos from {folders['videos']}")
     print(f"Open http://{args.host}:{args.port} in a browser")
     app.run(args.host, args.port, threaded=True)

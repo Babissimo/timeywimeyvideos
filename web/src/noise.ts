@@ -290,9 +290,11 @@ export class Noise {
                        period: this.period * factor });
   }
 
-  /** The same noise with some fields changed. */
+  /** The same noise with some fields changed; a field given as undefined stays as it is. */
   with(changes: NoiseOptions & { amplitude?: number }): Noise {
-    const { amplitude, size, speed, direction, seed, period } = { ...this, ...changes };
+    const given = Object.entries(changes).filter(([, value]) => value !== undefined);
+    const { amplitude, size, speed, direction, seed, period } =
+      { ...this, ...Object.fromEntries(given) } as Noise;
     return new Noise(amplitude, { size, speed, direction, seed, period });
   }
 

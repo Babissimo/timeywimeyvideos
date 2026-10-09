@@ -64,18 +64,27 @@ different `--scale`.
 
 ## Web front end
 
+The page is built with npm, which comes with [Node.js](https://nodejs.org/):
+
 ```sh
+npm install
+npm run build
 uv run webapp.py --videos ~/Movies
 ```
 
-then open <http://127.0.0.1:8000>. The page offers the videos in the folder
-you name (the top level only; `videos/` here by default) and any you upload,
-which are saved in `uploads/`.
+then open <http://127.0.0.1:8000>. Run `npm run build` again after changing
+the page. While working on it, run `npm run dev` beside `uv run webapp.py`
+instead and open the address it prints: it serves the page straight from
+`web/` as you edit it, and passes its requests for videos and renders on to
+the server.
+
+The page offers the videos in the folder you name (the top level only;
+`videos/` here by default) and any you upload, which are saved in `uploads/`.
 
 - **Live preview** plays the slice while you change the angle and other
-  options. It shows the same frames as `--preview` would render: the server
-  holds a half-size copy of the clip in memory and slices one frame per
-  request. Space plays and pauses; the arrow keys step a frame.
+  options. It shows the same frames as `--preview` would render: the browser
+  decodes a half-size copy of the clip, holds it on the GPU and slices each
+  frame there. Space plays and pauses; the arrow keys step a frame.
 - **Cuboid** draws the clip as a box (one unit per pixel or frame), with the
   first frame at the front and time running back, the current output frame
   drawn where it cuts through, and the region the sweep covers shaded on top.
@@ -87,8 +96,11 @@ which are saved in `uploads/`.
   separate process with the options on the page. Renders are saved in
   `renders/` and can be watched and downloaded from the page.
 
-The live view refuses clips that would need more than 2 GB of memory at half
-size; set a duration or scale to use part of a long video. The server only
+The live view needs a browser with WebGL2 and WebCodecs, such as a recent
+Chrome, that can decode the clip's video. The GPU holds the half-size clip in
+one piece, 4 bytes for every pixel of every frame, and may give no more than 1
+or 2 GB to one piece. The page says when a clip needs more than the GPU can
+give; set a duration or scale to use part of a long video. The server only
 listens on this machine unless you pass `--host`.
 
 ## How the angle works
@@ -300,6 +312,9 @@ it PX narrower (after `--scale`). Like `--loop-fade`, it can be at most half.
 - `main()` handles decoding and encoding (via ffmpeg).
 
 `webapp.py` is the web server (Flask), and `web/` holds the page it serves.
+The page's live view is TypeScript in `web/src/`, which decodes and slices
+clips the way `timeslice.py` does.
 
 Run the geometry checks with `uv run test_timeslice.py`, and the server's with
-`uv run test_webapp.py` (or run both with `uv run pytest`).
+`uv run test_webapp.py` (or run both with `uv run pytest`). `npm test` runs the
+page's checks, some of them in Chrome.
