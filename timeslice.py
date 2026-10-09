@@ -54,10 +54,12 @@ class VideoError(RuntimeError):
 
 
 def probe(path):
-    """Return (width, height, frame rate, duration in seconds or None)."""
+    """Return (width, height, frame rate, duration in seconds or None). The
+    frame rate is the one ffmpeg decodes the video at."""
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=width,height,r_frame_rate:stream_tags=rotate"
+         "-show_entries", "stream=width,height,r_frame_rate,avg_frame_rate"
+                          ":stream_tags=rotate"
                           ":stream_side_data=rotation:format=duration",
          "-of", "json", path],
         capture_output=True, text=True)
@@ -75,8 +77,17 @@ def probe(path):
     if abs(int(float(rotation))) % 180 == 90:
         width, height = height, width
 
+    # ffmpeg paces decoded frames to av_guess_frame_rate: r_frame_rate, unless
+    # that is over 210 fps and the average under 70, as in variable-rate MP4s
+    # at a time base of 1/600, when it is the average.
+    fps = Fraction(stream["r_frame_rate"])
+    num, den = map(int, stream.get("avg_frame_rate", "0/0").split("/"))
+    average = Fraction(num, den) if den else Fraction(0)
+    if fps > 210 and 0 < average < 70:
+        fps = average
+
     duration = info.get("format", {}).get("duration")
-    return (width, height, Fraction(stream["r_frame_rate"]),
+    return (width, height, fps,
             float(duration) if duration else None)
 
 
