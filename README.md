@@ -75,8 +75,7 @@ uv run webapp.py --videos ~/Movies
 then open <http://127.0.0.1:8000>. Run `npm run build` again after changing
 the page. While working on it, run `npm run dev` beside `uv run webapp.py`
 instead and open the address it prints: it serves the page straight from
-`web/` as you edit it, and passes its requests for videos and renders on to
-the server.
+`web/` as you edit it, and passes its requests for videos on to the server.
 
 The page offers the videos in the folder you name (the top level only;
 `videos/` here by default) and any you upload, which are saved in `uploads/`.
@@ -92,19 +91,28 @@ The page offers the videos in the folder you name (the top level only;
   below. With surface noise on it still draws the flat plane the points are
   pushed off, not the bumps. On a loop, each part of the frame past an end
   (or a side) of the box is drawn where it wraps round to.
-- **Render preview** and **Render full quality** run `timeslice.py` in a
-  separate process with the options on the page. Renders are saved in
-  `renders/` and can be watched and downloaded from the page.
+- **Render preview** and **Render full quality** render the slice in the
+  browser, as `timeslice.py` (with `--preview` for the first) would with the
+  options on the page, and encode it as H.264 in an MP4 named as the command
+  line's would be. A render runs on its own while you carry on with the page,
+  and can be cancelled. Renders are listed below the player, to watch,
+  download or remove, until you leave or reload the page, which asks first
+  while a render runs or one hasn't been downloaded.
 
-The live view needs a browser with WebGL2 and WebCodecs, such as a recent
-Chrome, that can decode the clip's video. The GPU holds the half-size clip as
+The page needs a browser with WebGL2 and WebCodecs, such as a recent Chrome,
+that can decode the clip's video and encode H.264. The GPU holds the clip as
 luma (brightness) at full size and colour at half size each way, 1.5 bytes for
 every pixel of every frame, in two pieces: the luma's 1 byte a pixel in one,
 the colour in the other. A GPU may give no more than 1 or 2 GB to one piece,
-and holds at most so many frames in one (2048 on many, about 2¼ minutes of 30
-fps video at the live view's half frame rate). The page says when a clip needs
-more than the GPU can give; set a duration or scale to use part of a long
-video. The server only listens on this machine unless you pass `--host`.
+and holds at most so many frames in one (2048 on many). The live view and
+previews hold the clip at half size and half the frame rate, a full-quality
+render at full size and every frame, so a full render of 30 fps 1080p video
+runs out of room at some 20 to 30 seconds of it. The page says when a clip
+needs more than the GPU can give; set a duration or scale to use part of a
+long video, or render it with `timeslice.py`, whose command the page shows.
+It shows the command too for a file the browser can't open, such as an AVI or
+a GIF, or whose video it can't decode. The server only listens on this
+machine unless you pass `--host`.
 
 ## How the angle works
 
@@ -315,8 +323,8 @@ it PX narrower (after `--scale`). Like `--loop-fade`, it can be at most half.
 - `main()` handles decoding and encoding (via ffmpeg).
 
 `webapp.py` is the web server (Flask), and `web/` holds the page it serves.
-The page's live view is TypeScript in `web/src/`, which decodes and slices
-clips the way `timeslice.py` does.
+The page's live view and renders are TypeScript in `web/src/`, which decodes,
+slices and encodes clips the way `timeslice.py` does.
 
 Run the geometry checks with `uv run test_timeslice.py`, and the server's with
 `uv run test_webapp.py` (or run both with `uv run pytest`). `npm test` runs the

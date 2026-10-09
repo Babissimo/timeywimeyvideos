@@ -162,19 +162,25 @@ describe("loopFades", () => {
 describe("fullSize", () => {
   test("reports the full-size render", () => {
     expect(fullSize(clip, read({ angle: 20, slice: "shear" })))
-      .toEqual({ width: 64, height: 48, frames: 82, seconds: 4.1, memory: 552960 });
+      .toEqual({ width: 64, height: 48, frames: 82, seconds: 4.1, memory: 276480 });
     expect(fullSize(clip, read({ angle: 30, fps: "30000/1001", scale: 0.5, start: 1,
                                  duration: 1.5 })))
-      .toEqual({ width: 43, height: 24, frames: 42, seconds: 1.4014, memory: 69120 });
+      .toEqual({ width: 43, height: 24, frames: 42, seconds: 1.4014, memory: 34560 });
     expect(fullSize(clip, read({ angle: 30, start: 5 })))
-      .toEqual({ width: 56, height: 48, frames: 33, seconds: 1.65, memory: 9216 });
+      .toEqual({ width: 56, height: 48, frames: 33, seconds: 1.65, memory: 4608 });
+  });
+
+  test("gives the GPU memory of the clip in YUV 4:2:0, chroma rounded up at odd sizes", () => {
+    // 60 frames of 58×43: luma 58 × 43, and Cb and Cr 29 × 22 each.
+    expect((fullSize(clip, read({ angle: 0, scale: 0.9 })) as FullSize).memory)
+      .toBe(60 * (58 * 43 + 2 * 29 * 22));
   });
 
   test("plans the full-size noise", () => {
     const noise = new Noise(3, { size: 10, speed: 0.5, direction: "perpendicular", seed: 4 });
     const full = fullSize(clip, read({ angle: 30, noise: 3, noise_size: 10, noise_speed: 0.5,
                                        noise_direction: "perpendicular", noise_seed: 4 }));
-    expect(full).toEqual({ width: 85, height: 48, frames: 90, seconds: 4.5, memory: 552960 });
+    expect(full).toEqual({ width: 85, height: 48, frames: 90, seconds: 4.5, memory: 276480 });
     expect((full as FullSize).frames).toBe(planSweep(60, 64, { angle: 30, noise }).frames);
   });
 
@@ -183,7 +189,7 @@ describe("fullSize", () => {
       .toBe(50);  // 60 frames less a second's fade
     expect(fullSize(clip, read({ angle: 80, loop: 1, loop_sides: 1, motion: "perpendicular",
                                  loop_side_fade: 8, inside: 1 })))
-      .toEqual({ width: 56, height: 48, frames: 341, seconds: 17.05, memory: 552960 });
+      .toEqual({ width: 56, height: 48, frames: 341, seconds: 17.05, memory: 276480 });
   });
 
   test("says why it can't be made", () => {
@@ -200,7 +206,7 @@ describe("fullSize", () => {
     const unknown = { ...clip, duration: null };
     expect(fullSize(unknown, read({ angle: 30 }))).toBeNull();
     expect(fullSize(unknown, read({ angle: 30, duration: 2 })))
-      .toEqual({ width: 75, height: 48, frames: 67, seconds: 3.35, memory: 368640 });
+      .toEqual({ width: 75, height: 48, frames: 67, seconds: 3.35, memory: 184320 });
   });
 });
 

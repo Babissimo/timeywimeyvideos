@@ -169,6 +169,16 @@ button.quiet { background: none; padding: 4px 8px; margin-top: 6px; }
 
 .error { color: var(--danger); white-space: pre-wrap; }
 
+.command {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  background: var(--raised);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
 .link {
   padding: 0;
   background: none;
@@ -235,6 +245,7 @@ video { display: block; width: 100%; max-height: 70vh; background: #000; border-
 #renders li.playing .name { color: var(--accent); }
 #renders .note { margin: 0; }
 #renders a { color: var(--muted); font-size: 12.5px; margin-left: auto; }
+#renders .remove { color: var(--muted); font-size: 12.5px; }
 
 @media (max-width: 1250px) {
   #views { grid-template-columns: minmax(0, 1fr); }
