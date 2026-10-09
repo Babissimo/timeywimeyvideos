@@ -117,7 +117,7 @@ VFR2400 = ["-vf", f"loop=loop=2:size={FRAMES},settb=1/2400,setpts='N*10+10*gte(N
 
 # About 30 fps at a time base of 1/1000, each frame up to 8 ms early or late: too uneven for
 # any standard rate, so ffmpeg takes the rate the codec declares, if the time base can count
-# it, or else the time base, whose 1000 fps sends it to the average rate.
+# it, or else the time base, whose 1000 fps sends it to the average rate if it has one.
 UNEVEN_MS = ["-vf", "settb=1/1000,setpts='N*33+trunc(8*sin(N*2.3))'", *PASSTHROUGH,
              "-enc_time_base", "1/1000", "-video_track_timescale", "1000"]
 # The same at a time base of 1/600, as phones write.
@@ -159,6 +159,19 @@ FIVE_THEN_TEN = ["-vf", "settb=1/1000,setpts='N*200-clip(N-32,0,8)*100'", *PASST
 # The frames twice over at 10 fps and a time base of 1/1000, frame 60 coming 300 ms late.
 TEN_LATE_60 = ["-vf", f"loop=loop=1:size={FRAMES},settb=1/1000,setpts='N*100+300*gte(N,60)'", *PASSTHROUGH,
                "-enc_time_base", "1/1000"]
+# The frames three times over at about 120 fps and a time base of 1/1000, each up to 3 ms early
+# or late: too uneven for any standard rate, so ffmpeg paces to the time base, the average being
+# over 70. An MP4 counts 1/16000 s unless told 1/1000, and ffmpeg then paces to the 1000 fps
+# x264 declares.
+UNEVEN_120_16K = ["-vf", f"loop=loop=2:size={FRAMES},settb=1/1000,setpts='trunc(N*25/3+3*sin(N*2.3))'",
+                  *PASSTHROUGH, "-enc_time_base", "1/1000"]
+UNEVEN_120 = [*UNEVEN_120_16K, "-video_track_timescale", "1000"]
+# 240 fps at a time base of 1/240, frame 5 a tick late.
+LATE_240 = ["-vf", "settb=1/240,setpts='N+gte(N,5)'", *PASSTHROUGH, "-enc_time_base", "1/240",
+            "-video_track_timescale", "240"]
+# UNEVEN_MS twice over, the second time after the packets ffmpeg reads while probing.
+UNEVEN_MS_TWICE = ["-vf", f"loop=loop=1:size={FRAMES},settb=1/1000,setpts='N*33+trunc(8*sin(N*2.3))'",
+                   *PASSTHROUGH, "-enc_time_base", "1/1000"]
 
 
 def ffmpeg(*args, input=None):
@@ -324,6 +337,26 @@ CLIPS = {
     "hevc-untimed-5-10.mkv": (Fraction(10), HEVC_UNTIMED + FIVE_THEN_TEN, "yuv420p", without_default_durations),
     # x265 declares 10 fps, from which ffmpeg makes up durations, so it probes all the packets.
     "hevc-5-10.mkv": (Fraction(10), HEVC + FIVE_THEN_TEN, "yuv420p", without_default_durations),
+    # As browsers record: with no rate in the timestamps or the header, ffmpeg would pace to the
+    # 1000 Hz time base, and the mean rate stands in.
+    "vp9-uneven.webm": (Fraction(30), VP9 + UNEVEN_MS, "yuv420p", without_default_durations),
+    # ffmpeg makes up a tick for each packet after those it reads while probing, a frame at the
+    # time base's 1000 fps, not at the mean rate standing in for it.
+    "vp9-uneven-twice.webm": (Fraction(30), VP9 + UNEVEN_MS_TWICE + ["-frames:v", "79"], "yuv420p",
+                              without_default_durations),
+    # The mean rate of the first frames stands in for the time base, not the average.
+    "h264-uneven-120.mp4": (Fraction(30), H264 + UNEVEN_120, "yuv420p"),
+    # ffmpeg gives the first packets no decode timestamps, B-frames following them, so the
+    # mean rate goes by when frames are shown.
+    "h264-uneven.mkv": (Fraction(30), H264 + UNEVEN_MS, "yuv420p", without_default_durations),
+    # A single frame spans no time, so the time base stands.
+    "vp9-single.webm": (Fraction(30), VP9 + UNEVEN_MS + ["-frames:v", "1"], "yuv420p",
+                        without_default_durations),
+    # ffmpeg judges 240 fps, the time base's, which stands as the frames come a tick apart.
+    "h264-240-late.mp4": (Fraction(30), H264 + LATE_240, "yuv420p"),
+    # ffmpeg paces to the 1000 fps x264 declares, not the file's time base, and the mean rate
+    # stands in.
+    "h264-uneven-120-16k.mp4": (Fraction(30), H264 + UNEVEN_120_16K, "yuv420p"),
 }
 
 
@@ -450,6 +483,25 @@ def option_sets(name, rate, tick):
         return [{}, {"time_scale": 0.5}, {"start": 0}]
     if name in ("vp9-5-10.webm", "hevc-untimed-5-10.mkv", "hevc-5-10.mkv"):
         return [{}, {"start": 3.1}]
+    if name == "vp9-uneven.webm":
+        # At twice the mean rate the last frame's end, a step after it as it has no duration,
+        # decides whether the fps filter fills one more tick.
+        return [{}, {"time_scale": 0.5}, {"time_scale": 2}, {"start": 0.51, "duration": 0.5}]
+    if name == "vp9-uneven-twice.webm":
+        # The last frame lasts a tick, which ffmpeg takes as made up, so it ends 24 ms on, the
+        # step from the frame before, rather than a frame at the mean rate on.
+        return [{"time_scale": 2}, {"time_scale": 3}, {"time_scale": 4}, {"start": 1.5, "time_scale": 2}]
+    if name == "h264-uneven-120.mp4":
+        return [{"scale": 0.5}, {"scale": 0.5, "time_scale": 0.5},
+                {"scale": 0.5, "start": 0.51, "duration": 0.2}]
+    if name == "h264-uneven.mkv":
+        return [{}, {"time_scale": 0.5}, {"start": 0.51, "duration": 0.5}]
+    if name == "vp9-single.webm":
+        return [{}]
+    if name == "h264-240-late.mp4":
+        return [{}, {"time_scale": 0.5}]
+    if name == "h264-uneven-120-16k.mp4":
+        return [{"scale": 0.5}, {"scale": 0.5, "time_scale": 0.5}]
     return [
         {},
         {"fast": True},

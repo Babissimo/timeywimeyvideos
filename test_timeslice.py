@@ -1,10 +1,11 @@
 """Geometry checks for the slicer. Run with `python test_timeslice.py` (or
-pytest). They use small random volumes, except the decoding check, which makes
-a tiny clip with ffmpeg in a temporary folder."""
+pytest). They use small random volumes, except the decoding checks, which make
+tiny clips with ffmpeg in a temporary folder."""
 
 import math
 import subprocess
 import tempfile
+from fractions import Fraction
 
 import numpy as np
 
@@ -639,6 +640,57 @@ def test_variable_rate_clips_decode_at_the_rate_ffmpeg_paces_them_to():
         # time_scale keeps a share of the frames ffmpeg paces to.
         halved, _ = timeslice.load_video(f"{folder}/600.mp4", time_scale=0.5)
         assert abs(len(halved) - decoded[600] / 2) <= 1
+
+
+# 40 frames about 30 fps apart at a time base of 1/1000, each up to 8 ms early
+# or late: too uneven for ffmpeg to find a frame rate in.
+UNEVEN_MS = "settb=1/1000,setpts='N*33+trunc(8*sin(N*2.3))'"
+# The same about 120 fps apart, each up to 3 ms early or late.
+UNEVEN_120 = "settb=1/1000,setpts='trunc(N*25/3+3*sin(N*2.3))'"
+
+
+def timed_clip(path, *options, timestamps=UNEVEN_MS, time_base="1/1000"):
+    """Encode 40 frames to `path` at these timestamps, in ticks of `time_base`,
+    and return the clip's r_frame_rate."""
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=32x24",
+                    "-frames:v", "40", "-vf", timestamps, "-fps_mode", "passthrough",
+                    "-enc_time_base", time_base, *options, "-pix_fmt", "yuv420p", path],
+                   check=True)
+    judged = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                             "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", path],
+                            capture_output=True, text=True, check=True).stdout
+    return Fraction(judged.strip())
+
+
+def test_a_rate_over_210_fps_twice_the_frames_gives_way_to_their_mean():
+    # An IVF file, like a browser's WebM recording, gives no rate in its
+    # header, so ffmpeg would pace to the 1000 Hz time base, 33 copies of every
+    # frame. The mean rate of the frames stands in, 39 steps in 1294 ms.
+    with tempfile.TemporaryDirectory() as folder:
+        clip = f"{folder}/recording.ivf"
+        assert timed_clip(clip, "-c:v", "libvpx-vp9") == 1000
+        _, _, fps, _ = timeslice.probe(clip)
+        volume, loaded_fps = timeslice.load_video(clip)
+        assert fps == loaded_fps == Fraction(39_000, 1294)
+        assert abs(len(volume) - 40) <= 1
+        # time_scale keeps a share of them.
+        assert abs(len(timeslice.load_video(clip, time_scale=0.5)[0]) - 20) <= 1
+        # Likewise where ffmpeg paces to the 1000 fps x264 declares for its time
+        # base, here in an MP4 counting 1/16000 s: 39 steps in 327 ms.
+        declared = f"{folder}/declared.mp4"
+        assert timed_clip(declared, "-c:v", "libx264", timestamps=UNEVEN_120) == 2000
+        assert timeslice.probe(declared)[2] == Fraction(39_000, 327)
+        # A single frame spans no time, so ffmpeg's rate stands.
+        single = f"{folder}/single.ivf"
+        timed_clip(single, "-c:v", "libvpx-vp9", "-frames:v", "1")
+        assert timeslice.probe(single)[2] == 1000
+        assert len(timeslice.load_video(single)[0]) == 1
+        # So does a rate the frames come at, here 240 fps at a time base of 1/240
+        # with frame 5 a tick late.
+        steady = f"{folder}/steady.mp4"
+        assert timed_clip(steady, "-video_track_timescale", "240", time_base="1/240",
+                          timestamps="settb=1/240,setpts='N+gte(N,5)'") == 240
+        assert timeslice.probe(steady)[2] == 240
 
 if __name__ == "__main__":
     for name, test in list(globals().items()):
