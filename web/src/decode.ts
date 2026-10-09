@@ -340,10 +340,13 @@ async function readPackets(clip: Clip, all: boolean, signal?: AbortSignal): Prom
     const declared = await declaredRate(track, codec);
     const parsed = codec === "avc";
     const probeLength = madeUp(resolution, null, declared, parsed);
+    // Matroska gives no decode timestamps, and ffmpeg infers H.264's only once it has decoded
+    // several frames, so times probing by them from later; that is not modelled.
+    const spans = codec !== "avc" || !(format instanceof MatroskaInputFormat);
     // The header's rate stands, known before any packet is read.
     const { rate: found, probePackets } = headerRate ? { rate: headerRate, probePackets: 0 }
       : frameRate(rateDts, resolution, index?.table ?? null, codec,
-                  { lengths: lengths.slice(first, last + 1), made: probeLength, average });
+                  { lengths: lengths.slice(first, last + 1), made: probeLength, average, spans });
     // Finding none, ffmpeg takes the rate the codec declares (doubled for H.264, which counts
     // fields) where the time base can tell its frames apart, and failing that the time base.
     const fields = declared && codec === "avc" ? multiply(declared, { num: 2, den: 1 }) : declared;
@@ -843,16 +846,18 @@ const STANDARD_RATES = [
 ];
 
 /** What ffmpeg's probe goes by besides the decode timestamps: the packets' durations (0 for
- * none), the duration it makes up for a packet without one, and the stream's average rate. */
-interface Probe { lengths: number[]; made: number; average: Rate | null }
+ * none), the duration it makes up for a packet without one, the stream's average rate, and
+ * whether it can time probing by the decode timestamps' span. */
+interface Probe { lengths: number[]; made: number; average: Rate | null; spans: boolean }
 
 /**
  * ffmpeg's ff_rfps_calculate over these decode timestamps, the common step it found, starting
  * from `common`, and how many packets it read. Given a `probe`, over as many as ffmpeg reads
  * while probing: 20 frame steps (40 for a time base coarser than 0.5 ms), or 5 s by the longer
- * of the packets' durations and the frames at the average rate. Without, over all of them, as
- * the mov demuxer passes its header's. Other streams' packets, which can end probing sooner or
- * later, and ffmpeg's 5 MB limit on what it reads are not modelled.
+ * of the packets' durations and the frames at the average rate, or where it `spans` and lacks
+ * both, after 30 frames, by the span of the decode timestamps from the third. Without, over all
+ * of them, as the mov demuxer passes its header's. Other streams' packets, which can end probing
+ * sooner or later, and ffmpeg's 5 MB limit on what it reads are not modelled.
  */
 function standardRate(dts: number[], resolution: number, probe?: Probe,
                       common = 0): { rate: Rate | null; common: number; read: number } {
@@ -876,6 +881,8 @@ function standardRate(dts: number[], resolution: number, probe?: Probe,
       const byLengths = rescale(BigInt(probed), MICRO, res);
       const byFrames = average?.num ? rescale(BigInt(p) * BigInt(average.den), MICRO, BigInt(average.num)) : 0n;
       if (byLengths >= 5_000_000n || byFrames >= 5_000_000n) break;
+      if (probe.spans && !byLengths && !byFrames && p > 30
+          && rescale(BigInt(dts[p]! - dts[2]!), MICRO, res) >= 5_000_000n) break;
       const length = probe.lengths[p] ?? 0;
       probed += length > 0 ? length : probe.made;
     }

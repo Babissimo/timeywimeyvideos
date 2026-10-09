@@ -318,6 +318,12 @@ CLIPS = {
     # from that, as it parses the stream, but only the HEVC packets it reads while probing.
     "h264-30-at-10.mkv": (Fraction(30), H264_DECLARED_30 + TEN_LATE_60, "yuv420p", without_default_durations),
     "hevc-30-at-10.mkv": (Fraction(30), HEVC + TEN_LATE_60, "yuv420p", without_default_durations),
+    # Without packet durations or an average rate, ffmpeg stops probing at 5 s of decode
+    # timestamps, so judges 5 fps.
+    "vp9-5-10.webm": (Fraction(10), VP9 + FIVE_THEN_TEN, "yuv420p", without_default_durations),
+    "hevc-untimed-5-10.mkv": (Fraction(10), HEVC_UNTIMED + FIVE_THEN_TEN, "yuv420p", without_default_durations),
+    # x265 declares 10 fps, from which ffmpeg makes up durations, so it probes all the packets.
+    "hevc-5-10.mkv": (Fraction(10), HEVC + FIVE_THEN_TEN, "yuv420p", without_default_durations),
 }
 
 
@@ -442,6 +448,8 @@ def option_sets(name, rate, tick):
         return [{"time_scale": 0.5}, {"start": 0}]
     if name == "hevc-30-at-10.mkv":
         return [{}, {"time_scale": 0.5}, {"start": 0}]
+    if name in ("vp9-5-10.webm", "hevc-untimed-5-10.mkv", "hevc-5-10.mkv"):
+        return [{}, {"start": 3.1}]
     return [
         {},
         {"fast": True},
