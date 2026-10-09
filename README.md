@@ -97,11 +97,14 @@ The page offers the videos in the folder you name (the top level only;
   `renders/` and can be watched and downloaded from the page.
 
 The live view needs a browser with WebGL2 and WebCodecs, such as a recent
-Chrome, that can decode the clip's video. The GPU holds the half-size clip in
-one piece, 4 bytes for every pixel of every frame, and may give no more than 1
-or 2 GB to one piece. The page says when a clip needs more than the GPU can
-give; set a duration or scale to use part of a long video. The server only
-listens on this machine unless you pass `--host`.
+Chrome, that can decode the clip's video. The GPU holds the half-size clip as
+luma (brightness) at full size and colour at half size each way, 1.5 bytes for
+every pixel of every frame, in two pieces: the luma's 1 byte a pixel in one,
+the colour in the other. A GPU may give no more than 1 or 2 GB to one piece,
+and holds at most so many frames in one (2048 on many, about 2¼ minutes of 30
+fps video at the live view's half frame rate). The page says when a clip needs
+more than the GPU can give; set a duration or scale to use part of a long
+video. The server only listens on this machine unless you pass `--host`.
 
 ## How the angle works
 

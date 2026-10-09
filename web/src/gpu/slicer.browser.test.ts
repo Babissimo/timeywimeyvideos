@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, test } from "vitest";
 import { Noise } from "../noise";
-import { clips, rgba, type SliceCase, sliceCases, Tally, upload } from "./fixture";
+import { blockClip, type Clip, clips, crossfadeCases, readFrame, rgba, type SliceCase,
+         sliceCases, smoothClip, Tally, upload } from "./fixture";
 import { Slicer } from "./slicer";
 import { Volume } from "./volume";
 
@@ -54,6 +55,105 @@ describe("noisy slices match timeslice.slice_frame", () => {
   }
 });
 
+/** RGBA pixels as RGB, to tally against. */
+const rgb = (pixels: Uint8Array) => pixels.filter((_, i) => i % 4 !== 3);
+
+/**
+ * Slice every frame of a case both ways from a clip of its volume's shape, made by `make`,
+ * held in YUV 4:2:0, tallying how far each is from the same slice of the clip held as RGBA.
+ */
+function yuvTally(c: SliceCase, make: (frames: number, height: number, width: number) => Clip):
+    { nearest: Tally; bilinear: Tally } {
+  const clip = make(c.clip.frames, c.clip.height, c.clip.width);
+  const exact = upload(gl, clip), yuv = upload(gl, clip, "yuv420");
+  for (const volume of [exact, yuv]) {
+    volume.crossfade(c.fade[0], 0);
+    volume.crossfade(c.fade[1], 2);
+  }
+  const nearest = new Tally(), bilinear = new Tally();
+  for (const frame of c.frames) {
+    for (const [tally, near] of [[nearest, true], [bilinear, false]] as const) {
+      const options = { wrap: c.wrap, wrapX: c.wrapX, noise: frame.noise, nearest: near };
+      slicer.slice(exact, frame.columns, options);
+      const expected = rgb(slicer.read());
+      slicer.slice(yuv, frame.columns, options);
+      tally.add(slicer.read(), expected);
+    }
+  }
+  exact.dispose();
+  yuv.dispose();
+  console.log(`${c.name}, ${make.name}\n  nearest: ${nearest.summary}\n`
+              + `  bilinear: ${bilinear.summary}`);
+  expect(nearest.translucent + bilinear.translucent).toBe(0);
+  return { nearest, bilinear };
+}
+
+describe("YUV 4:2:0 slices match RGBA ones to rounding where 2×2 blocks are one colour", () => {
+  // A fade of columns blends blocks that 4:2:0 then can't hold apart.
+  for (const c of sliceCases.filter((c) => c.fade[1] === 0)) {
+    test(c.name, () => {
+      const { nearest, bilinear } = yuvTally(c, blockClip);
+      expect(nearest.maxDiff).toBeLessThanOrEqual(1);
+      expect(bilinear.maxDiff).toBeLessThanOrEqual(2);
+    });
+  }
+});
+
+describe("YUV 4:2:0 slices of smooth content match RGBA ones, mean 2 and max 12 levels", () => {
+  for (const c of sliceCases) {
+    test(c.name, () => {
+      for (const tally of Object.values(yuvTally(c, smoothClip))) {
+        expect(tally.meanDiff).toBeLessThanOrEqual(2);
+        expect(tally.maxDiff).toBeLessThanOrEqual(12);
+      }
+    });
+  }
+});
+
+/** Frame t of a volume, sliced at 0°. */
+function frameOf(volume: Volume, t: number): Uint8Array {
+  const x = Float64Array.from({ length: volume.width }, (_, i) => i);
+  slicer.slice(volume, { t: new Float64Array(volume.width).fill(t), x }, { nearest: true });
+  return slicer.read();
+}
+
+describe("YUV 4:2:0 crossfades of smooth content are close to RGBA ones held in YUV 4:2:0", () => {
+  const cases: [string, Clip, number, 0 | 2][] = [
+    ...crossfadeCases.map(({ name, clip, n, axis }) =>
+      [name, clip, n, axis] as [string, Clip, number, 0 | 2]),
+    ["small, 3 of 11 columns", clips.small, 3, 2],
+    ["small, 4 of 11 columns", clips.small, 4, 2],
+    ["big, 11 of 300 columns", clips.big, 11, 2],
+  ];
+  for (const [name, { frames, height, width }, n, axis] of cases) {
+    test(name, () => {
+      const clip = smoothClip(frames, height, width);
+      const exact = upload(gl, clip), yuv = upload(gl, clip, "yuv420");
+      exact.crossfade(n, axis);
+      yuv.crossfade(n, axis);
+      expect([yuv.frames, yuv.width]).toEqual([exact.frames, exact.width]);
+      // A fade of columns far apart changes colour steeply across them, more than chroma at
+      // half size can follow, so the YUV fade is held to what 4:2:0 makes of the RGBA one.
+      const held = Volume.create(gl, exact.frames, exact.height, exact.width,
+                                 { format: "yuv420" });
+      for (let t = 0; t < exact.frames; t++) held.upload(t, readFrame(gl, exact, t));
+      const fromExact = new Tally(), fromHeld = new Tally();
+      for (let t = 0; t < yuv.frames; t++) {
+        const faded = frameOf(yuv, t);
+        fromExact.add(faded, rgb(frameOf(exact, t)));
+        fromHeld.add(faded, rgb(frameOf(held, t)));
+      }
+      for (const volume of [exact, yuv, held]) volume.dispose();
+      console.log(`${name}\n  from RGBA: ${fromExact.summary}\n`
+                  + `  from RGBA held in YUV: ${fromHeld.summary}`);
+      // 2.3 where the fade is a tenth of the frame, more of it steep than elsewhere.
+      expect(fromExact.meanDiff).toBeLessThanOrEqual(2.5);
+      expect(fromHeld.meanDiff).toBeLessThanOrEqual(1);
+      expect(fromHeld.maxDiff).toBeLessThanOrEqual(5);
+    });
+  }
+});
+
 describe("Slicer", () => {
   test("matches timeslice's float64 blend at random positions", () => {
     let seed = 1;
@@ -86,6 +186,50 @@ describe("Slicer", () => {
     volume.dispose();
     console.log(`random positions\n  bilinear: ${tally.summary}`);
     expect(tally.identical).toBe(tally.channels);
+  });
+
+  test("wraps round in x between columns that share no chroma", () => {
+    for (const width of [11, 10]) {
+      const clip = blockClip(3, 5, width);
+      const exact = upload(gl, clip), yuv = upload(gl, clip, "yuv420");
+      // From the second-last column, past the last and round to the second.
+      const x = Float64Array.from({ length: 64 }, (_, j) => width - 2 + j * 4 / 64);
+      const columns = { t: new Float64Array(64).fill(1.25), x };
+      for (const nearest of [true, false]) {
+        const tally = new Tally();
+        slicer.slice(exact, columns, { nearest, wrapX: true });
+        const expected = rgb(slicer.read());
+        slicer.slice(yuv, columns, { nearest, wrapX: true });
+        tally.add(slicer.read(), expected);
+        expect(tally.maxDiff, `${width} wide, nearest ${nearest}`).toBeLessThanOrEqual(2);
+      }
+      exact.dispose();
+      yuv.dispose();
+    }
+  });
+
+  test("slices volumes of either format in turn", () => {
+    const clip = blockClip(4, 6, 9);
+    const exact = upload(gl, clip), yuv = upload(gl, clip, "yuv420");
+    canvas.width = clip.width;
+    canvas.height = clip.height;
+    const x = Float64Array.from({ length: clip.width }, (_, i) => i);
+    const columns = { t: new Float64Array(clip.width).fill(2), x };
+    for (const nearest of [true, false]) {
+      for (let rep = 0; rep < 2; rep++) {
+        slicer.slice(exact, columns, { nearest });
+        expect(slicer.read()).toEqual(rgba(clip, 2));
+        slicer.draw();
+        slicer.slice(yuv, columns, { nearest });
+        const tally = new Tally();
+        tally.add(slicer.read(), rgb(rgba(clip, 2)));
+        expect(tally.maxDiff).toBeLessThanOrEqual(1);
+        slicer.draw();
+      }
+    }
+    expect(gl.getError()).toBe(gl.NO_ERROR);
+    exact.dispose();
+    yuv.dispose();
   });
 
   test("takes noise only for a frame the size of its grid", () => {

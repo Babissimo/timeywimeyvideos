@@ -4,7 +4,7 @@
  */
 import raw from "../../test/fixtures/sampler.json?raw";
 import type { Columns, NoiseGrid } from "../types";
-import { Volume } from "./volume";
+import { Volume, type VolumeFormat } from "./volume";
 
 /** A clip as numpy holds it: (t, y, x) voxels of 3 channels. */
 export interface Clip { frames: number; height: number; width: number; rgb: Uint8Array }
@@ -107,23 +107,59 @@ export function rgba(clip: Clip, t: number): Uint8Array {
   return out;
 }
 
+/** A clip whose every 2×2 block of pixels, from the top left, is one random colour. */
+export function blockClip(frames: number, height: number, width: number): Clip {
+  let seed = frames * 7919 + height * 104729 + width;
+  const random = () => (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 24;
+  const [rows, columns] = [Math.ceil(height / 2), Math.ceil(width / 2)];
+  const blocks = Array.from({ length: frames * rows * columns * 3 }, random);
+  const rgb = new Uint8Array(frames * height * width * 3);
+  let i = 0;
+  for (let t = 0; t < frames; t++)
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++)
+        for (let c = 0; c < 3; c++)
+          rgb[i++] = blocks[((t * rows + (y >> 1)) * columns + (x >> 1)) * 3 + c];
+  return { frames, height, width, rgb };
+}
+
+/** A clip whose colours change by at most 6 levels from pixel to pixel, 10 from frame to frame. */
+export function smoothClip(frames: number, height: number, width: number): Clip {
+  const rgb = new Uint8Array(frames * height * width * 3);
+  let i = 0;
+  for (let t = 0; t < frames; t++)
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++)
+        for (let c = 0; c < 3; c++)
+          rgb[i++] = Math.round(127.5 + 100 * Math.sin(0.1 * t + 0.02 * (c + 1) * x
+                                                       + 0.02 * (3 - c) * y + 2 * c));
+  return { frames, height, width, rgb };
+}
+
 /** A volume holding the clip. */
-export function upload(gl: WebGL2RenderingContext, clip: Clip): Volume {
-  const volume = Volume.create(gl, clip.frames, clip.height, clip.width);
+export function upload(gl: WebGL2RenderingContext, clip: Clip,
+                       format: VolumeFormat = "rgba"): Volume {
+  const volume = Volume.create(gl, clip.frames, clip.height, clip.width, { format });
   for (let t = 0; t < clip.frames; t++) volume.upload(t, rgba(clip, t));
   return volume;
 }
 
-/** Frame t of a volume, as many columns as it has now, as RGBA rows top-first. */
-export function readFrame(gl: WebGL2RenderingContext, volume: Volume, t: number): Uint8Array {
+/** Layer t of a texture array, width × height texels of it, as RGBA rows top-first. */
+export function readLayer(gl: WebGL2RenderingContext, texture: WebGLTexture, t: number,
+                          width: number, height: number): Uint8Array {
   const framebuffer = gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
-  gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, volume.texture, 0, t);
-  const out = new Uint8Array(volume.width * volume.height * 4);
-  gl.readPixels(0, 0, volume.width, volume.height, gl.RGBA, gl.UNSIGNED_BYTE, out);
+  gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, texture, 0, t);
+  const out = new Uint8Array(width * height * 4);
+  gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, out);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.deleteFramebuffer(framebuffer);
   return out;
+}
+
+/** Frame t of an RGBA volume, as many columns as it has now, as RGBA rows top-first. */
+export function readFrame(gl: WebGL2RenderingContext, volume: Volume, t: number): Uint8Array {
+  return readLayer(gl, volume.planes[0].texture, t, volume.width, volume.height);
 }
 
 const percent = (part: number, whole: number) => `${+(100 * part / whole).toFixed(3)}%`;
@@ -132,7 +168,7 @@ const percent = (part: number, whole: number) => `${+(100 * part / whole).toFixe
 export class Tally {
   channels = 0; identical = 0; withinOne = 0;
   pixels = 0; pixelsIdentical = 0;
-  maxDiff = 0;
+  maxDiff = 0; sumDiff = 0;
   translucent = 0;  // pixels whose alpha isn't 255
   // Columns of the frames added with their width, and those most of whose pixels are more
   // than 1 off.
@@ -152,6 +188,7 @@ export class Tally {
         else same = false;
         if (diff <= 1) this.withinOne++;
         most = Math.max(most, diff);
+        this.sumDiff += diff;
       }
       this.maxDiff = Math.max(this.maxDiff, most);
       this.pixels++;
@@ -164,11 +201,13 @@ export class Tally {
     for (const count of off) if (2 * count > rows) this.wrongColumns++;
   }
 
+  get meanDiff(): number { return this.sumDiff / this.channels; }
+
   get summary(): string {
     return `${percent(this.identical, this.channels)} of ${this.channels} channels identical, ` +
       `${percent(this.withinOne, this.channels)} within 1, ` +
       `${percent(this.pixelsIdentical, this.pixels)} of pixels identical, ` +
-      `max diff ${this.maxDiff}` +
+      `max diff ${this.maxDiff}, mean ${this.meanDiff.toFixed(3)}` +
       (this.columns ? `, ${this.wrongColumns} of ${this.columns} columns wrong` : "");
   }
 }

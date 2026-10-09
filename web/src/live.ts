@@ -1,6 +1,6 @@
 /**
- * The live preview: a copy of the clip at half size in x, y and time, held on the GPU and
- * sliced there a frame at a time, as `timeslice.py --preview` renders it.
+ * The live preview: a copy of the clip at half size in x, y and time, held on the GPU in YUV
+ * 4:2:0 and sliced there a frame at a time, as `timeslice.py --preview` renders it.
  */
 import { load, planLoad, probe, VideoError, type ClipInfo, type LoadOptions,
          type LoadPlan } from "./decode";
@@ -309,7 +309,7 @@ export class Live {
     }
     this.release();  // let the old clip go before the new one takes its memory
     try {
-      return Volume.create(gl, frames, height, width);
+      return Volume.create(gl, frames, height, width, { format: "yuv420" });
     } catch (error) {
       if (!(error instanceof VolumeTooLarge)) throw error;
       throw new Problem(`The live view would need ${(error.bytes / 1e9).toFixed(1)} GB of GPU `
