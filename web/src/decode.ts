@@ -8,7 +8,7 @@ import {
   UnsupportedInputFormatError, VideoSample, VideoSampleSink, type InputTrack, type InputVideoTrack,
 } from "mediabunny";
 import { avcFrameRate } from "./avc";
-import { readMatroska, readMp4, type Mp4Track } from "./container";
+import { isText, readMatroska, readMp4, type Mp4Track } from "./container";
 import { hevcFrameRate } from "./hevc";
 import { gcd, limitDenominator, roundHalfEven } from "./pymath";
 import type { Rate } from "./types";
@@ -485,23 +485,29 @@ async function trackStart(track: InputTrack, isobmff: boolean,
 function startOf(starts: (bigint | null)[], textStart: number | null): bigint {
   let start: bigint | null = null;
   for (const us of starts) if (us !== null && (start === null || us < start)) start = us;
-  // ffmpeg takes a subtitle or data stream's start only when it is less than a second
-  // before the others' (or they have none). Mediabunny lists no such streams.
-  if (textStart !== null) {
-    const text = BigInt(textStart);
-    if (start === null || (start > text && start - text < MICRO)) start = text;
-  }
-  return start ?? 0n;
+  // Mediabunny lists no subtitle or data streams.
+  return withText(start, textStart === null ? null : BigInt(textStart), -1n) ?? 0n;
+}
+
+/** The other streams' start, end or duration, `main`, or a subtitle or data stream's, `text`,
+ * where ffmpeg takes that instead: when the others have none, or when it is less than a second
+ * past theirs, later for `past` 1 and earlier for -1. */
+function withText(main: bigint | null, text: bigint | null, past: 1n | -1n): bigint | null {
+  if (main === null || text === null) return main ?? text;
+  const gap = (text - main) * past;
+  return gap > 0n && gap < MICRO ? text : main;
 }
 
 /** How long ffmpeg takes an MP4 to last from its streams' durations, given its header's
- * tracks, in microseconds: from the file's start to where the last of these streams ends, its
- * duration after its own start, or the longest duration if that is more. Null if the
- * header holds none of the streams. */
+ * tracks, in microseconds: from the file's start to where the last stream ends, its duration
+ * after its own start, or the longest duration if that is more. Mediabunny lists the video
+ * and audio, which start as given; a subtitle or data track starts only where the header
+ * starts it, so not at all where its samples are all in fragments, though ffmpeg starts it at
+ * the first it reads. Null if the header holds none of the streams. */
 function timedLength(tracks: InputTrack[], starts: (bigint | null)[], fileStart: bigint,
                      header: Map<number, Mp4Track>): bigint | null {
   const later = (a: bigint | null, b: bigint) => a === null || b > a ? b : a;
-  let [end, longest]: (bigint | null)[] = [null, null];
+  let [end, longest, textEnd, textLongest]: (bigint | null)[] = [null, null, null, null];
   for (const [i, track] of tracks.entries()) {
     const duration = header.get(track.id)?.duration;
     if (duration === undefined) continue;
@@ -509,6 +515,13 @@ function timedLength(tracks: InputTrack[], starts: (bigint | null)[], fileStart:
     if (start !== null) end = later(end, start + BigInt(duration));
     longest = later(longest, BigInt(duration));
   }
+  for (const { handler, start, duration } of header.values()) {
+    if (!isText(handler)) continue;
+    if (start !== null) textEnd = later(textEnd, BigInt(start + duration));
+    textLongest = later(textLongest, BigInt(duration));
+  }
+  end = withText(end, textEnd, 1n);
+  longest = withText(longest, textLongest, 1n);
   if (longest === null) return null;
   return end !== null && end - fileStart > longest ? end - fileStart : longest;
 }

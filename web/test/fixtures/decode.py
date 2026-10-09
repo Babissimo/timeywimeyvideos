@@ -208,16 +208,17 @@ def add_audio(codec, video_offset=None, seconds=1.7, flags=(), sound_offset=None
                                    "-b:a", "16k", *flags, *BITEXACT, dst)
 
 
-def add_subtitles(video_offset=None):
-    """Add a WebVTT stream from 0, which ffmpeg counts and Mediabunny doesn't list,
-    the video starting video_offset seconds later."""
+def add_subtitles(video_offset=None, until=1.0, codec="webvtt"):
+    """Add a subtitle stream from 0, which ffmpeg counts and Mediabunny doesn't list,
+    the video starting video_offset seconds later. Its one cue lasts until `until`
+    seconds, and `codec` encodes it."""
     offset = [] if video_offset is None else ["-itsoffset", video_offset]
 
     def step(src, dst):
         cues = dst.with_suffix(".vtt")
-        cues.write_text("WEBVTT\n\n00:00.000 --> 00:01.000\nhello\n")
+        cues.write_text(f"WEBVTT\n\n00:00.000 --> 00:{until:06.3f}\nhello\n")
         ffmpeg(*offset, "-i", src, "-i", cues, "-map", "0:v", "-map", "1:s", "-c:v", "copy",
-               "-c:s", "webvtt", *BITEXACT, dst)
+               "-c:s", codec, *BITEXACT, dst)
         cues.unlink()
     return step
 
@@ -405,6 +406,14 @@ CLIPS = {
     # file with the video all the same.
     "h264-aac-same-id.mp4": (Fraction(30), H264, "yuv420p",
                              add_audio("aac", seconds=0.5, sound_offset=0.7), repeat_track_id),
+    # ffmpeg ends the file with a subtitle stream ending less than a second after the video,
+    # which starts half a second after it.
+    "h264-subs-end.mp4": (Fraction(30), H264, "yuv420p",
+                          add_subtitles(video_offset=0.5, until=2.5, codec="mov_text")),
+    # Starting the file with the video, over a second after the subtitles, ffmpeg takes the
+    # subtitles' duration, less than a second longer than the video's.
+    "h264-subs-long.mp4": (Fraction(30), H264, "yuv420p",
+                           add_subtitles(video_offset=1.5, until=2.0, codec="mov_text")),
 }
 
 
@@ -557,6 +566,8 @@ def option_sets(name, rate, tick):
         return [{}, {"time_scale": 0.5}, {"start": 0.51, "duration": 0.5}]
     if name == "h264-aac-same-id.mp4":
         return [{}]
+    if name in ("h264-subs-end.mp4", "h264-subs-long.mp4"):
+        return [{}, {"start": 0.51}]
     return [
         {},
         {"fast": True},

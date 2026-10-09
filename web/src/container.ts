@@ -57,6 +57,12 @@ export interface Mp4Track {
   duration: number;
 }
 
+/** Whether a track with this handler type counts as a subtitle or data stream, as any but
+ * video and sound does. */
+export function isText(handler: string): boolean {
+  return handler !== "vide" && handler !== "soun";
+}
+
 /** An edit that shows a track's media, in the track's time scale: it follows empty edits
  * lasting `delay`, and shows the media from `time` for `duration`. */
 export interface Edit { delay: number; time: number; duration: number }
@@ -415,7 +421,7 @@ export async function readMp4(source: Blob, expand?: number): Promise<Mp4Header>
         tracks.set(trak.id, track);
         timings.push([track, timed[i]!]);
         if (!extents.has(trak.id)) extents.set(trak.id, timed[i]!);
-        if (["vide", "soun"].includes(track.handler) || track.start === null) continue;
+        if (!isText(track.handler) || track.start === null) continue;
         if (textStart === null || track.start < textStart) textStart = track.start;
       }
       header = { streams: traks.length, textStart, tracks };
