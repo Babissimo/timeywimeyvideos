@@ -662,6 +662,19 @@ def timed_clip(path, *options, timestamps=UNEVEN_MS, time_base="1/1000"):
     return Fraction(judged.strip())
 
 
+def test_h264_decodes_at_the_rate_it_declares_where_ffmpeg_switches_to_that():
+    # ffprobe takes the 30 fps x264 declares as 60, since H.264 can count
+    # fields, but ffmpeg paces to the 30, the average being so far from 60.
+    with tempfile.TemporaryDirectory() as folder:
+        clip = f"{folder}/declared.mp4"
+        assert timed_clip(clip, "-c:v", "libx264", "-x264-params", "force-cfr=1:fps=30",
+                          "-video_track_timescale", "1000") == 60
+        _, _, fps, length = timeslice.probe(clip)
+        volume, loaded_fps = timeslice.load_video(clip)
+        assert fps == loaded_fps == 30
+        assert abs(len(volume) / fps - length) < 3 / fps
+
+
 def test_a_rate_over_210_fps_twice_the_frames_gives_way_to_their_mean():
     # An IVF file, like a browser's WebM recording, gives no rate in its
     # header, so ffmpeg would pace to the 1000 Hz time base, 33 copies of every

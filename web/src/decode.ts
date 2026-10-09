@@ -285,8 +285,8 @@ async function readPackets(clip: Clip, all: boolean, signal?: AbortSignal): Prom
     const codec = await track.getCodec();
     // The r_frame_rate a container's header gives, which ffmpeg knows before reading packets.
     let headerRate: Rate | null = null;
-    // ffmpeg's avg_frame_rate: an MP4's over the samples its header and the fragments read
-    // with it hold, a Matroska track's its default duration's. Other containers' is not modelled.
+    // ffmpeg's avg_frame_rate as the header gives it: an MP4's over the samples its header and
+    // the fragments read with it hold, a Matroska track's its default duration's.
     let average: Rate | null = null;
     if (isobmff) {
       const header = await readMp4(source, track.id);
@@ -360,11 +360,12 @@ async function readPackets(clip: Clip, all: boolean, signal?: AbortSignal): Prom
     const fields = declared && codec === "avc" ? multiply(declared, { num: 2, den: 1 }) : declared;
     const base = Math.round(resolution);
     const rFrameRate = found ?? (fields && fields.num <= base * fields.den ? fields : { num: base, den: 1 });
-    // ffmpeg paces decoded frames to av_guess_frame_rate: r_frame_rate, or the average where
-    // that is under 70 fps and r_frame_rate over 210.
-    const toAverage = average !== null && rFrameRate.num > 210 * rFrameRate.den
-      && average.num < 70 * average.den;
-    const paced = toAverage ? average! : rFrameRate;
+    // Without an average in the header, ffmpeg averages the durations of the packets it read
+    // while probing, from the third on: in a Matroska file, the ones it made up. Other
+    // containers' is not modelled.
+    const averaged = average ?? (format instanceof MatroskaInputFormat
+      && probeLength > 0 && probePackets > 2 ? averageRate(resolution, probeLength) : null);
+    const paced = guessFrameRate(rFrameRate, averaged, codec === "avc" ? declared : null);
     // For want of anything better ffmpeg paces to the time base, or a rate an encoder declared
     // from it, as with a browser's WebM recording. Over 210 fps that is no frame rate unless the
     // frames come about that often: where the first shown average half as often or less,
@@ -716,8 +717,6 @@ function chooseFrames(timeline: Timeline, rate: Rate, start?: number, duration?:
 
   const timed: Timed[] = [];
   if (rate.num === paced.num && rate.den === paced.den) {
-    // Without the fps filter ffmpeg paces to av_guess_frame_rate. Its switch to an H.264
-    // stream's declared rate, which timeslice.probe can't see, is not modelled.
     // In output frames to 1/2^bits of a frame (2^bits × paced.num within 2^29, bits at
     // most 16), then 2^-17 further from 0 unless whole, as ffmpeg times them.
     const bits = Math.min(Math.max(29 - Math.floor(Math.log2(paced.num)), 0), 16);
@@ -824,6 +823,37 @@ function madeUp(resolution: number, rate: Rate | null, declared: Rate | null, pa
   if (resolution < 1000) return 1;
   if (declared && declared.num < declared.den * 1000) return Math.floor(resolution * declared.den / declared.num);
   return 0;
+}
+
+/** The avg_frame_rate ffmpeg works out from packets that each last `length` ticks: their rate,
+ * or the standard rate nearest it if one is within 1%. */
+function averageRate(resolution: number, length: number): Rate {
+  const rate = avReduce(BigInt(Math.round(resolution)), BigInt(length), 60000n);
+  let best = 0.01;
+  let found = 0;
+  for (const standard of STANDARD_RATES) {
+    const error = Math.abs(rate.num / rate.den / (standard / 12012) - 1);
+    if (error < best) {
+      best = error;
+      found = standard;
+    }
+  }
+  return found ? avReduce(BigInt(found), 12012n, INT_MAX) : rate;
+}
+
+/**
+ * ffmpeg's av_guess_frame_rate, the rate it paces decoded frames to without the fps filter:
+ * r_frame_rate, or the average where that is under 70 fps and r_frame_rate over 210; then,
+ * for H.264, which can count fields, the rate the stream declares (`declared`) where that is
+ * under 0.7 of the rate so far and the average over a tenth away from it.
+ */
+function guessFrameRate(rFrameRate: Rate, average: Rate | null, declared: Rate | null): Rate {
+  let rate = rFrameRate;
+  if (average && average.num < 70 * average.den && rate.num > 210 * rate.den) rate = average;
+  // Without an average the comparison fails, as ffmpeg's does with its 0/0.
+  const off = average ? Math.abs(1 - (average.num / average.den) / (rate.num / rate.den)) : NaN;
+  if (declared && declared.num / declared.den < rate.num / rate.den * 0.7 && off > 0.1) rate = declared;
+  return rate;
 }
 
 /**

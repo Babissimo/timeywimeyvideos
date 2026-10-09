@@ -79,8 +79,7 @@ REORDER = 16
 def _probe(path):
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=width,height,r_frame_rate,avg_frame_rate,time_base"
-                          ":stream_tags=rotate"
+         "-show_entries", "stream=width,height,time_base:stream_tags=rotate"
                           ":stream_side_data=rotation:format=duration:packet=pts,flags",
          "-read_intervals", f"%+#{RATE_FRAMES + REORDER}", "-of", "json", path],
         capture_output=True, text=True)
@@ -99,16 +98,7 @@ def _probe(path):
     if abs(int(float(rotation))) % 180 == 90:
         width, height = height, width
 
-    # ffmpeg paces decoded frames to av_guess_frame_rate: r_frame_rate, unless
-    # that is over 210 fps and the average under 70, as in variable-rate MP4s
-    # at a time base of 1/600, when it is the average.
-    paced = Fraction(stream["r_frame_rate"])
-    num, den = map(int, stream.get("avg_frame_rate", "0/0").split("/"))
-    average = Fraction(num, den) if den else Fraction(0)
-    if paced > 210 and 0 < average < 70:
-        paced = average
-
-    fps = paced
+    fps = paced = _paced_rate(path)
     # For want of anything better ffmpeg paces to the time base, or a rate an
     # encoder declared from it, as with a browser's WebM recording. Over 210
     # fps that is no frame rate unless the frames come about that often: where
@@ -121,6 +111,26 @@ def _probe(path):
 
     duration = info.get("format", {}).get("duration")
     return _Probed(width, height, fps, float(duration) if duration else None, paced)
+
+
+def _paced_rate(path):
+    """The rate ffmpeg paces decoded frames to when no filter sets one
+    (av_guess_frame_rate), as the inverse of the time base it encodes them in.
+    ffmpeg picks it from r_frame_rate, the average and, for codecs that can
+    count fields such as H.264, the rate the stream declares, which ffprobe
+    doesn't show."""
+    # framecrc is timed as load_video's raw output is wherever ffmpeg has a
+    # rate, which probing always gives it. -fps_mode cfr would match it even
+    # without one, but needs ffmpeg 5.1.
+    out = subprocess.run(
+        ["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-map", "0:v:0", "-frames:v", "1",
+         "-f", "framecrc", "-"],
+        capture_output=True, text=True)
+    for line in out.stdout.splitlines():
+        if line.startswith("#tb 0:"):
+            return 1 / Fraction(line.split(":")[1].strip())
+    sys.stderr.write(out.stderr)  # ffmpeg's reason, as load_video's decoding prints it
+    raise VideoError(f"ffmpeg failed to decode {path}")
 
 
 def _mean_rate(packets, base):
