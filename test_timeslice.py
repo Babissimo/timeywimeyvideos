@@ -1,7 +1,10 @@
 """Geometry checks for the slicer. Run with `python test_timeslice.py` (or
-pytest). They use small random volumes, so no video files are needed."""
+pytest). They use small random volumes, except the decoding check, which makes
+a tiny clip with ffmpeg in a temporary folder."""
 
 import math
+import subprocess
+import tempfile
 
 import numpy as np
 
@@ -608,6 +611,34 @@ def test_crossfade_can_blend_across_the_sides():
     assert np.array_equal(looped, expected)
     raises(ValueError, timeslice.crossfade, long_volume.copy(), 3, axis=2)  # over half of 5
 
+
+def test_variable_rate_clips_decode_at_the_rate_ffmpeg_paces_them_to():
+    # Both clips are 240 fps to ffprobe. At a time base of 1/600, as phones and
+    # screen recorders write, two uneven steps bring the average to about 30,
+    # and ffmpeg paces to that. At 1/2400 one frame lasts twice as long, the
+    # average stays over 70, and ffmpeg keeps to 240.
+    with tempfile.TemporaryDirectory() as folder:
+        decoded = {}
+        for base, frames, pts in [(600, 120, "N*20+5*gte(N,30)+7*gte(N,40)"),
+                                  (2400, 24, "N*10+10*gte(N,12)")]:
+            clip = f"{folder}/{base}.mp4"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=32x24",
+                            "-frames:v", str(frames), "-vf", f"settb=1/{base},setpts='{pts}'",
+                            "-fps_mode", "passthrough", "-enc_time_base", f"1/{base}",
+                            "-video_track_timescale", str(base), "-pix_fmt", "yuv420p", clip],
+                           check=True)
+            judged = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                                     "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0",
+                                     clip], capture_output=True, text=True, check=True).stdout
+            assert judged.strip() == "240/1"
+            _, _, fps, length = timeslice.probe(clip)
+            volume, loaded_fps = timeslice.load_video(clip)
+            assert fps == loaded_fps
+            assert abs(len(volume) / fps - length) < 3 / fps
+            decoded[base] = len(volume)
+        # time_scale keeps a share of the frames ffmpeg paces to.
+        halved, _ = timeslice.load_video(f"{folder}/600.mp4", time_scale=0.5)
+        assert abs(len(halved) - decoded[600] / 2) <= 1
 
 if __name__ == "__main__":
     for name, test in list(globals().items()):
