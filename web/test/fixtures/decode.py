@@ -137,6 +137,28 @@ HEVC_UNTIMED = [*X265, "-x265-params", "log-level=error:vui-timing-info=0"]
 # The frames three times over at 240 fps and a time base of 1/1000, the stream stating 30.
 AT_240 = ["-vf", f"loop=loop=2:size={FRAMES},settb=1/1000,setpts='trunc(N*25/6+0.5)'", *PASSTHROUGH,
           "-enc_time_base", "1/1000"]
+# ffmpeg's mov demuxer drops VP9 packets' durations and makes them up from r_frame_rate, here the
+# time base's 1000 fps, but for those it reads while probing for that rate, unless it seeks and
+# reads them again. UNEVEN_MS twice over, frame 41 coming 133 ms late: probing reads 41 frames.
+UNEVEN_STALL = ["-vf", f"loop=loop=1:size={FRAMES},settb=1/1000,"
+                "setpts='N*33+trunc(8*sin(N*2.3))+133*gte(N,41)'", *PASSTHROUGH,
+                "-enc_time_base", "1/1000", "-video_track_timescale", "1000"]
+# About 5 fps at a time base of 1/1000, frame 23 coming 800 ms late: probing stops at 5 s of
+# frames at the average rate, after 24.
+SLOW_STALL = ["-vf", "settb=1/1000,setpts='N*200+trunc(40*sin(N*2.3))+800*gte(N,23)'", *PASSTHROUGH,
+              "-enc_time_base", "1/1000", "-video_track_timescale", "1000"]
+# The frames three times over at 30 fps and a time base of 1/600, frame 20 two frames late and
+# frames from 45 on up to 8 ticks early or late: too uneven for the header's 99 samples to give
+# ffmpeg a rate, which it finds in the 41 packets it then probes, each lasting a tick.
+COARSE_STALL = ["-vf", f"loop=loop=2:size={FRAMES},settb=1/600,"
+                "setpts='N*20+40*gte(N,20)+gte(N,45)*trunc(8*sin(N*2.3))'", *PASSTHROUGH,
+                "-enc_time_base", "1/600", "-video_track_timescale", "600"]
+# 5 fps for 32 frames at a time base of 1/1000, then 10 fps.
+FIVE_THEN_TEN = ["-vf", "settb=1/1000,setpts='N*200-clip(N-32,0,8)*100'", *PASSTHROUGH,
+                 "-enc_time_base", "1/1000"]
+# The frames twice over at 10 fps and a time base of 1/1000, frame 60 coming 300 ms late.
+TEN_LATE_60 = ["-vf", f"loop=loop=1:size={FRAMES},settb=1/1000,setpts='N*100+300*gte(N,60)'", *PASSTHROUGH,
+               "-enc_time_base", "1/1000"]
 
 
 def ffmpeg(*args, input=None):
@@ -282,6 +304,20 @@ CLIPS = {
     "hevc-uneven-untimed.mp4": (Fraction(30), HEVC_UNTIMED + UNEVEN_600, "yuv420p"),
     # ffmpeg judges 240 fps from the timestamps and paces to the 4 fps the default duration gives.
     "vp9-240-at-4.webm": (Fraction(30), VP9 + AT_240, "yuv420p", default_duration(250_000_000)),
+    # Probing reads every packet, so none lasts 1 ms unless ffmpeg seeks.
+    "vp9-uneven-frag.mp4": (Fraction(30), VP9 + UNEVEN_MS + FRAGMENTED, "yuv420p"),
+    # The late frame is the first to last 1 ms.
+    "vp9-uneven-stall.mp4": (Fraction(30), VP9 + UNEVEN_STALL, "yuv420p"),
+    # The late frame is the last read while probing.
+    "vp9-slow-stall.mp4": (Fraction(5), VP9 + SLOW_STALL, "yuv420p"),
+    # The late frame lasts a tick.
+    "vp9-600-stall.mp4": (Fraction(30), VP9 + COARSE_STALL, "yuv420p"),
+    # Reading the header, ffmpeg judges 10 fps, from which it makes up every packet's duration.
+    "vp9-5-10.mp4": (Fraction(10), VP9 + FIVE_THEN_TEN + ["-video_track_timescale", "1000"], "yuv420p"),
+    # Without durations, each declaring 30 fps: ffmpeg makes up every H.264 packet's duration
+    # from that, as it parses the stream, but only the HEVC packets it reads while probing.
+    "h264-30-at-10.mkv": (Fraction(30), H264_DECLARED_30 + TEN_LATE_60, "yuv420p", without_default_durations),
+    "hevc-30-at-10.mkv": (Fraction(30), HEVC + TEN_LATE_60, "yuv420p", without_default_durations),
 }
 
 
@@ -394,6 +430,18 @@ def option_sets(name, rate, tick):
         return [{}, {"time_scale": 0.5}, {"start": 0.51, "duration": 0.5}]
     if name == "vp9-240-at-4.webm":
         return [{}, {"time_scale": 2}, {"start": 0.1}]
+    if name == "vp9-uneven-frag.mp4":
+        # Passed through, a frame without a duration lasts one at the rate paced to; before the
+        # fps filter, the last lasts the step from the one before it.
+        return [{}, {"time_scale": 2}, {"start": 0.51, "duration": 0.5}]
+    if name in ("vp9-uneven-stall.mp4", "vp9-slow-stall.mp4", "vp9-600-stall.mp4"):
+        return [{}, {"start": 0}]
+    if name == "vp9-5-10.mp4":
+        return [{}, {"start": 3.1}, {"duration": 7}]
+    if name == "h264-30-at-10.mkv":
+        return [{"time_scale": 0.5}, {"start": 0}]
+    if name == "hevc-30-at-10.mkv":
+        return [{}, {"time_scale": 0.5}, {"start": 0}]
     return [
         {},
         {"fast": True},

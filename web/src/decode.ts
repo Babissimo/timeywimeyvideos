@@ -218,7 +218,7 @@ interface Packets {
   isobmff: boolean;
   /** The timestamps Mediabunny gives, which its decoded samples carry. */
   samples: number[];
-  /** ffmpeg's presentation and decode timestamps, durations (0 if the container gives none)
+  /** ffmpeg's presentation and decode timestamps, durations (0 where its demuxer reads none)
    * and key frames. */
   pts: number[]; dts: number[]; lengths: number[]; keys: boolean[];
   /** Decode indices in presentation order. */
@@ -228,9 +228,11 @@ interface Packets {
   first: number; last: number; hidden: boolean[];
   /** How far before its target an MP4 seek compares decode timestamps. */
   seekBack: number;
-  /** ffprobe's r_frame_rate, or the rate that stands in for a time base taken as one, from
-   * which ffmpeg's demuxer makes up a missing packet duration. */
-  rFrameRate: Rate;
+  /** The duration ffmpeg's demuxer makes up for a packet without one: read while probing,
+   * before it knows r_frame_rate, and after. */
+  made: { probing: number; after: number };
+  /** How many packets, from `first`, ffmpeg reads while probing before it knows r_frame_rate. */
+  probePackets: number;
   /** When the file starts, in microseconds: its streams' earliest first timestamp. */
   fileStart: bigint;
   /** How many streams the file holds, of any kind. */
@@ -272,8 +274,9 @@ async function readPackets(clip: Clip, all: boolean, signal?: AbortSignal): Prom
     let starts: Map<number, Mp4Track> | undefined;
     let index: MovIndex | undefined;
     let seekBack = 0;
-    // The rate a Matroska track's default duration gives.
-    let defaultRate: Rate | null = null;
+    const codec = await track.getCodec();
+    // The r_frame_rate a container's header gives, which ffmpeg knows before reading packets.
+    let headerRate: Rate | null = null;
     // ffmpeg's avg_frame_rate: an MP4's over the samples its header and the fragments read
     // with it hold, a Matroska track's its default duration's. Other containers' is not modelled.
     let average: Rate | null = null;
@@ -286,11 +289,16 @@ async function readPackets(clip: Clip, all: boolean, signal?: AbortSignal): Prom
         average = avReduce(BigInt(Math.round(resolution)) * BigInt(counted.samples), BigInt(counted.duration),
                            INT_MAX);
       }
-      // Packets last as their samples do. ffmpeg parses VP8 and VP9 in full, which drops the
-      // durations; that is not modelled.
+      // Packets last as their samples do.
       if (video && video.durations.length === pts.length) {
         index = movIndex(video, keys);
         lengths = video.durations;
+        // A sample table in which every sample in the index but the last lasts as long as the
+        // first gives r_frame_rate exactly.
+        const steps = lengths.slice(index.first, index.last + 1);
+        if (steps[0]! > 0 && steps.slice(1, -1).every((d) => d === steps[0])) {
+          headerRate = avReduce(BigInt(Math.round(resolution)), BigInt(steps[0]!), INT_MAX);
+        }
       } else {
         // A fragmented file's tables are in its fragments, so the decode timestamps stay
         // rebuilt, and a sample lasts until the next one's.
@@ -300,11 +308,17 @@ async function readPackets(clip: Clip, all: boolean, signal?: AbortSignal): Prom
         // ffmpeg's seek looks back by the reorder delay; without one, not at all.
         if (video?.edited && pts.length > 0) seekBack = pts[order[0]!]! - dts[0]!;
       }
+      // ffmpeg's mov demuxer has VP8 and VP9 parsed in full, which drops the packets' durations.
+      if (codec === "vp8" || codec === "vp9") lengths = lengths.map(() => 0);
     } else if (format instanceof MatroskaInputFormat) {
       const header = await readMatroska(source);
       ({ streams, textStart } = header);
       const defaultDuration = header.defaultDurations.get(track.id) ?? null;
-      if (defaultDuration) average = defaultRate = avReduce(1_000_000_000n, BigInt(defaultDuration), 30000n);
+      if (defaultDuration) {
+        average = avReduce(1_000_000_000n, BigInt(defaultDuration), 30000n);
+        // ffmpeg takes it for r_frame_rate between 5 and 1000 fps.
+        if (average.num > average.den * 5 && average.num < average.den * 1000) headerRate = average;
+      }
       // Blocks take the track's default duration, cut to whole ticks. In ffmpeg a block's
       // own BlockDuration, which a remux of variable-rate video writes, overrides it; Mediabunny
       // doesn't report that, so here the default stands.
@@ -320,12 +334,18 @@ async function readPackets(clip: Clip, all: boolean, signal?: AbortSignal): Prom
     // ffmpeg probes the rate from the packets its index holds.
     const rateDts = index ? dts.slice(first, last + 1)
       : isobmff || pts.length <= RATE_PACKETS ? dts : decodeTimestamps(pts.slice(0, RATE_PACKETS));
-    const codec = await track.getCodec();
-    const found = frameRate(rateDts, lengths.slice(first, last + 1), resolution, index?.table ?? null,
-                            defaultRate, codec);
+    // The rate the codec declares, from which ffmpeg can make up durations, and whether it
+    // parses the stream: of the codecs whose rates are read, its mov and Matroska demuxers parse
+    // H.264 but not HEVC.
+    const declared = await declaredRate(track, codec);
+    const parsed = codec === "avc";
+    const probeLength = madeUp(resolution, null, declared, parsed);
+    // The header's rate stands, known before any packet is read.
+    const { rate: found, probePackets } = headerRate ? { rate: headerRate, probePackets: 0 }
+      : frameRate(rateDts, resolution, index?.table ?? null, codec,
+                  { lengths: lengths.slice(first, last + 1), made: probeLength, average });
     // Finding none, ffmpeg takes the rate the codec declares (doubled for H.264, which counts
     // fields) where the time base can tell its frames apart, and failing that the time base.
-    const declared = found ? null : await declaredRate(track, codec);
     const fields = declared && codec === "avc" ? multiply(declared, { num: 2, den: 1 }) : declared;
     const base = Math.round(resolution);
     const byTimeBase = !found && !(fields && fields.num <= base * fields.den);
@@ -358,9 +378,10 @@ async function readPackets(clip: Clip, all: boolean, signal?: AbortSignal): Prom
       width: turned ? codedHeight : codedWidth, height: turned ? codedWidth : codedHeight, fps,
       duration: Number.isFinite(duration) && duration > 0 ? duration : null,
     };
+    const made = { probing: probeLength, after: madeUp(resolution, rFrameRate, declared, parsed) };
     return {
       info, resolution, isobmff, samples, pts, dts, lengths, keys, order, first, last, hidden, seekBack,
-      rFrameRate, fileStart, streams,
+      made, probePackets, fileStart, streams,
     };
   } catch (error) {
     if (error instanceof VideoError || signal?.aborted) throw error;
@@ -382,11 +403,13 @@ interface Timeline {
   fileStart: bigint;
   /** How far before its target an MP4 seek compares decode timestamps. */
   seekBack: number;
-  /** ffprobe's r_frame_rate, or the rate that stands in for a time base taken as one, from
-   * which ffmpeg's demuxer makes up a missing packet duration. */
-  rFrameRate: Rate;
+  /** The duration ffmpeg's demuxer makes up for a packet without one: read while probing,
+   * before it knows r_frame_rate, and after. */
+  made: { probing: number; after: number };
+  /** How many packets, from `first`, ffmpeg reads while probing before it knows r_frame_rate. */
+  probePackets: number;
   /** In presentation order: when ffmpeg shows each frame, the timestamp its decoded sample
-   * carries here, its packet's duration (0 if the container gives none) and its place in
+   * carries here, its packet's duration (0 where the demuxer reads none) and its place in
    * decode order. */
   starts: number[]; samples: number[]; lengths: number[]; decodeIndex: number[];
   /** In decode order: decode timestamps, which packets are key frames, and which ffmpeg
@@ -632,12 +655,17 @@ function chooseFrames(timeline: Timeline, rate: Rate, start?: number, duration?:
     return i >= firstDecoded && i <= lastIndexed && !hidden[i];
   });
 
-  // A packet without a duration lasts one frame at r_frame_rate, rounded down, as ffmpeg's
-  // demuxer makes one up.
-  const { info: { fps }, rFrameRate } = timeline;
-  const made = Math.floor(resolution * rFrameRate.den / rFrameRate.num);
+  // A packet without a duration has the one ffmpeg's demuxer makes up, which differs for those
+  // read while probing, unless a seek drops them to be read again.
+  const { info: { fps }, made } = timeline;
+  const probing = startUs === null ? indexed + timeline.probePackets : 0;
   const lengths = new Map<number, number>();
-  for (const k of decoded) lengths.set(k, timeline.lengths[k]! > 0 ? timeline.lengths[k]! : Math.max(made, 1));
+  for (const k of decoded) {
+    const given = timeline.lengths[k]!;
+    lengths.set(k, given > 0 ? given : decodeIndex[k]! < probing ? made.probing : made.after);
+  }
+  // One frame at the rate ffmpeg paces to.
+  const period = Math.max(1, Math.round(resolution * fps.den / fps.num));
 
   const us = duration === undefined ? 0 : microseconds(duration);
   const limit = us === 0 ? null : rescale(BigInt(us), res, MICRO);
@@ -663,8 +691,7 @@ function chooseFrames(timeline: Timeline, rate: Rate, start?: number, duration?:
     // ffmpeg takes the codec's declared rate, else the stream's average.
     const before = decoded[decoded.indexOf(last) - 1];
     const step = before === undefined ? 0 : starts[last]! - starts[before]!;
-    const given = timeline.lengths[last]! > 0 ? timeline.lengths[last]! : made;
-    const period = Math.max(1, Math.round(resolution * fps.den / fps.num));
+    const given = lengths.get(last)!;
     const length = given > 0 && !(given === 1 && step > 2) ? given : step > 0 ? step : period;
     end = BigInt(starts[last]! + length) + offset;
   }
@@ -680,7 +707,9 @@ function chooseFrames(timeline: Timeline, rate: Rate, start?: number, duration?:
       let at = Number(rescale(BigInt(starts[k]!) + offset, BigInt(fps.num) << BigInt(bits),
                               res * BigInt(fps.den))) / 2 ** bits;
       if (at !== Math.round(at)) at += Math.sign(at) / 2 ** 17;
-      timed.push({ frame: k, at, length: lengths.get(k)! * (1 / resolution) / (fps.den / fps.num) });
+      // ffmpeg's filters give a frame still without a duration one frame.
+      const length = lengths.get(k)! || period;
+      timed.push({ frame: k, at, length: length * (1 / resolution) / (fps.den / fps.num) });
     }
   } else {
     const tick = (pts: bigint) => rescale(pts, BigInt(rate.num), res * BigInt(rate.den));
@@ -743,32 +772,40 @@ function pace(frames: Timed[], singleStream: boolean): number[] {
 }
 
 /**
- * The frame rate ffprobe calls r_frame_rate, where ffmpeg finds one in the container or the
- * timestamps; null where it doesn't. An MP4 whose sample table (`table`, each sample's
- * decode timestamp) has every sample in the index but the last lasting as long as the first
- * gives it exactly; so does the rate a Matroska track's default duration gives (`defaultRate`),
- * between 5 and 1000 fps; otherwise, for H.264 and HEVC and for time bases finer than
- * 1/100 s or coarser than 1/5 s, it is estimated from decode timestamps: as ffmpeg reads an
- * MP4's header, from the first 99 samples in its table (taken only for such a time base),
- * then from the packets read while probing (`dts` and `lengths`), the first 20 frame steps of
- * them (40 for a time base coarser than 0.5 ms). The estimate is the greatest common step if
- * every step after the third shares one, else the standard rate whose ticks the timestamps
- * fall on most evenly.
+ * The frame rate ffprobe calls r_frame_rate, where ffmpeg estimates one from decode timestamps
+ * (null where it doesn't), and how many packets it reads while probing before it knows it. It
+ * estimates one for H.264 and HEVC and for time bases finer than 1/100 s or coarser than 1/5 s:
+ * as it reads an MP4's header, from the first 99 samples in its table (`table`, each sample's
+ * decode timestamp; taken only for such a time base), then from the packets read while probing
+ * (`dts` and `probe`, as `standardRate` takes them). The estimate is the greatest common step if
+ * every step after the third shares one, else the standard rate whose ticks the timestamps fall
+ * on most evenly. For other streams, probing reads a single packet.
  */
-function frameRate(dts: number[], lengths: number[], resolution: number, table: number[] | null,
-                   defaultRate: Rate | null, codec: string | null): Rate | null {
-  if (table && lengths[0]! > 0 && lengths.slice(1, -1).every((d) => d === lengths[0])) {
-    return avReduce(BigInt(Math.round(resolution)), BigInt(lengths[0]!), INT_MAX);
-  }
-  if (defaultRate && defaultRate.num < defaultRate.den * 1000 && defaultRate.num > defaultRate.den * 5) {
-    return defaultRate;
-  }
+function frameRate(dts: number[], resolution: number, table: number[] | null, codec: string | null,
+                   probe: Probe): { rate: Rate | null; probePackets: number } {
   const unreliableBase = resolution >= 101 || resolution < 5;
-  if (!unreliableBase && codec !== "avc" && codec !== "hevc") return null;
+  if (!unreliableBase && codec !== "avc" && codec !== "hevc") {
+    return { rate: null, probePackets: Math.min(dts.length, 1) };
+  }
   // Reading the header, ffmpeg knows no codec yet, so judges by the time base alone. It
   // carries the common step found there into the probe.
   const header = table ? standardRate(table.slice(0, 99), resolution) : { rate: null, common: 0 };
-  return (unreliableBase ? header.rate : null) ?? standardRate(dts, resolution, lengths, header.common).rate;
+  if (unreliableBase && header.rate) return { rate: header.rate, probePackets: 0 };
+  const { rate, read } = standardRate(dts, resolution, probe, header.common);
+  return { rate, probePackets: read };
+}
+
+/**
+ * The duration ffmpeg's demuxer makes up for a packet without one, in ticks: a frame at
+ * r_frame_rate (`rate`, once known), unless it parses the stream (`parsed`) and the codec
+ * declares a rate (`declared`); failing that, a tick of a time base coarser than 1 ms; failing
+ * that, a frame at a declared rate under 1000 fps; else none.
+ */
+function madeUp(resolution: number, rate: Rate | null, declared: Rate | null, parsed: boolean): number {
+  if (rate && !(parsed && declared)) return Math.floor(resolution * rate.den / rate.num);
+  if (resolution < 1000) return 1;
+  if (declared && declared.num < declared.den * 1000) return Math.floor(resolution * declared.den / declared.num);
+  return 0;
 }
 
 /**
@@ -805,14 +842,21 @@ const STANDARD_RATES = [
   ...[24, 30, 60, 12, 15, 48].map((r) => r * 1000 * 12),
 ];
 
+/** What ffmpeg's probe goes by besides the decode timestamps: the packets' durations (0 for
+ * none), the duration it makes up for a packet without one, and the stream's average rate. */
+interface Probe { lengths: number[]; made: number; average: Rate | null }
+
 /**
- * ffmpeg's ff_rfps_calculate over these decode timestamps, and the common step it found,
- * starting from `common`. Given the packets' `lengths`, over as many as ffmpeg reads
- * while probing; without, over all of them, as the mov demuxer passes its header's.
+ * ffmpeg's ff_rfps_calculate over these decode timestamps, the common step it found, starting
+ * from `common`, and how many packets it read. Given a `probe`, over as many as ffmpeg reads
+ * while probing: 20 frame steps (40 for a time base coarser than 0.5 ms), or 5 s by the longer
+ * of the packets' durations and the frames at the average rate. Without, over all of them, as
+ * the mov demuxer passes its header's. Other streams' packets, which can end probing sooner or
+ * later, and ffmpeg's 5 MB limit on what it reads are not modelled.
  */
-function standardRate(dts: number[], resolution: number, lengths?: number[],
-                      common = 0): { rate: Rate | null; common: number } {
-  const want = !lengths ? Infinity : 1 / resolution > 0.0005 ? 40 : 20;
+function standardRate(dts: number[], resolution: number, probe?: Probe,
+                      common = 0): { rate: Rate | null; common: number; read: number } {
+  const want = !probe ? Infinity : 1 / resolution > 0.0005 ? 40 : 20;
   const n = STANDARD_RATES.length;
   // For each rate, and for ticks counted from 0 or from half a tick: the sums of
   // each timestamp's distance from its nearest tick, and of its square.
@@ -822,10 +866,18 @@ function standardRate(dts: number[], resolution: number, lengths?: number[],
   let stepSum = 0;
   let probed = 0;
   let last: number | undefined;
+  let read = 0;
+  const res = BigInt(Math.round(resolution));
   for (let p = 0; p < dts.length && count < want; p++) {
-    if (lengths && p >= 2) {
-      if (probed / resolution >= 5) break;  // ffmpeg probes at most 5 s
-      probed += lengths[p] ?? 0;
+    read = p + 1;  // the packet that reaches the time limit is read but not counted
+    if (probe && p >= 2) {
+      // ffmpeg probes at most 5 s, timed in whole microseconds.
+      const { average } = probe;
+      const byLengths = rescale(BigInt(probed), MICRO, res);
+      const byFrames = average?.num ? rescale(BigInt(p) * BigInt(average.den), MICRO, BigInt(average.num)) : 0n;
+      if (byLengths >= 5_000_000n || byFrames >= 5_000_000n) break;
+      const length = probe.lengths[p] ?? 0;
+      probed += length > 0 ? length : probe.made;
     }
     const ts = dts[p]!;
     if (last !== undefined && ts > last) {
@@ -853,9 +905,9 @@ function standardRate(dts: number[], resolution: number, lengths?: number[],
     last = ts;
   }
   if (count > 15 && common > Math.max(1, Math.floor(resolution / 500))) {
-    return { rate: avReduce(BigInt(Math.round(resolution)), BigInt(common), INT_MAX), common };
+    return { rate: avReduce(res, BigInt(common), INT_MAX), common, read };
   }
-  if (count < 2) return { rate: null, common };
+  if (count < 2) return { rate: null, common, read };
   let best = 0.01;
   let found = 0;
   for (let i = 0; i < n; i++) {
@@ -873,7 +925,7 @@ function standardRate(dts: number[], resolution: number, lengths?: number[],
     }
   }
   const rate = found && found / 12012 < 1.01 * resolution ? avReduce(BigInt(found), 12012n, INT_MAX) : null;
-  return { rate, common };
+  return { rate, common, read };
 }
 
 const MICRO = 1_000_000n;

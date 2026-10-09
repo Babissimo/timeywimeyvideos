@@ -17,7 +17,7 @@ const { junk, undecodable, unopenable, clips, errors, cases, clipSeconds: second
   junk: string; undecodable: string; unopenable: string; clips: Record<string, PyClip>; errors: PyError[];
   cases: PyCase[]; clipSeconds: [number | null, number | null, number | null, number | null][];
 };
-const urls = import.meta.glob<string>("../test/fixtures/decode/*.{mp4,webm,wav,avi}",
+const urls = import.meta.glob<string>("../test/fixtures/decode/*.{mp4,webm,mkv,wav,avi}",
                                      { query: "?url", import: "default", eager: true });
 
 async function file(name: string): Promise<File> {
