@@ -1,11 +1,11 @@
 import { afterAll, afterEach, describe, expect, test, vi } from "vitest";
 import raw from "../test/fixtures/live.json?raw";
 import h264 from "../test/fixtures/decode/h264-30.mp4?url";
-import turned from "../test/fixtures/decode/h264-rot90.mp4?url";
+import rot90 from "../test/fixtures/decode/h264-rot90.mp4?url";
 import { probe } from "./decode";
 import { NOISY } from "./gpu/shaders";
 import { Volume, VolumeTooLarge } from "./gpu/volume";
-import { fetchSource, Live, type FrameInfo } from "./live";
+import { Live, type FrameInfo } from "./live";
 import { Noise } from "./noise";
 import { endpoints, fullSize, liveNoise, plan, Problem, readOptions } from "./options";
 
@@ -14,13 +14,8 @@ type PyFrame = Omit<FrameInfo, "memory" | "full"> & {
 };
 
 const cases = JSON.parse(raw) as PyFrame[];
-const SOURCE = "videos/h264-30.mp4";
-
-let bytes: Promise<Blob> | undefined;
-async function clip(): Promise<File> {
-  bytes ??= fetch(h264).then((res) => res.blob());
-  return new File([await bytes], "h264-30.mp4");
-}
+const SOURCE = new File([await (await fetch(h264)).blob()], "h264-30.mp4");
+const TURNED = new File([await (await fetch(rot90)).blob()], "h264-rot90.mp4");
 
 /** Let a canvas's GPU context go, as browsers allow only so many at once. */
 const free = (canvas: HTMLCanvasElement) =>
@@ -32,22 +27,15 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-type Open = (source: string) => Promise<Blob>;
-
-/** A live view on a canvas of its own, and how many times it has opened a file. */
-function view(open?: Open): { live: Live; canvas: HTMLCanvasElement; opened: () => number } {
+/** A live view on a canvas of its own. */
+function view(): { live: Live; canvas: HTMLCanvasElement } {
   const canvas = document.createElement("canvas");
-  let count = 0;
-  const live = new Live(canvas, async (source) => {
-    count++;
-    return open ? open(source) : clip();
-  });
-  return { live, canvas, opened: () => count };
+  return { live: new Live(canvas), canvas };
 }
 
 /** A view for one test, freed after it. */
-function make(open?: Open): ReturnType<typeof view> {
-  const one = view(open);
+function make(): ReturnType<typeof view> {
+  const one = view();
   made.push(one.canvas);
   return one;
 }
@@ -100,7 +88,7 @@ describe("shows the frames timeslice --preview makes", () => {
       close(info.first, c.first);
       close(info.last, c.last);
       expect(info.memory).toBeGreaterThanOrEqual(yuvBytes(c.volume));  // more before fades
-      expect(info.full).toEqual(fullSize(await probe(await clip()), readOptions(c.values)));
+      expect(info.full).toEqual(fullSize(await probe(SOURCE), readOptions(c.values)));
 
       // The browser decodes a little differently from ffmpeg, so frames match closely but
       // not exactly; the wrong frame or column of the clip would differ by far more.
@@ -127,8 +115,8 @@ describe("shows the frames timeslice --preview makes", () => {
 });
 
 describe("Live", () => {
-  test("loads a clip only when the options it is loaded with change", async () => {
-    const { live, opened } = make();
+  test("loads a clip only when the file or the options it is loaded with change", async () => {
+    const { live } = make();
     const progress = vi.fn();
     await live.show(SOURCE, { angle: "30" }, 0.5, progress);
     expect(progress).toHaveBeenCalledTimes(20);
@@ -139,10 +127,15 @@ describe("Live", () => {
     expect(progress).not.toHaveBeenCalled();
     await live.show(SOURCE, { angle: "30", scale: "0.5" }, 0.5, progress);
     expect(progress).toHaveBeenCalledTimes(20);
-    expect(opened()).toBe(1);
+    progress.mockClear();
     live.unload();
-    await live.show(SOURCE, { angle: "30", scale: "0.5" }, 0.5);
-    expect(opened()).toBe(2);
+    await live.show(SOURCE, { angle: "30", scale: "0.5" }, 0.5, progress);
+    expect(progress).toHaveBeenCalledTimes(20);
+    progress.mockClear();
+    // Another file of the same name, as a file opened again gives.
+    const again = new File([SOURCE], SOURCE.name);
+    await live.show(again, { angle: "30", scale: "0.5" }, 0.5, progress);
+    expect(progress).toHaveBeenCalledTimes(20);
     live.dispose();
   });
 
@@ -215,12 +208,10 @@ describe("Live", () => {
   });
 
   test("plans afresh for another clip with the same options", async () => {
-    const { live } = make(async (source) =>
-      source === SOURCE ? clip() : fetch(turned).then((res) => res.blob()));
+    const { live } = make();
     const values = { angle: "30" };
     expect((await live.show(SOURCE, values, 0.5)).volume).toEqual([20, 24, 32]);
-    expect((await live.show("videos/h264-rot90.mp4", values, 0.5)).volume)
-      .toEqual([20, 32, 24]);
+    expect((await live.show(TURNED, values, 0.5)).volume).toEqual([20, 32, 24]);
     live.dispose();
   });
 
@@ -290,7 +281,7 @@ describe("Live", () => {
     const real = gl.getParameter.bind(gl);
     vi.spyOn(gl, "getParameter").mockImplementation((name: GLenum) =>
       name === gl.MAX_VIEWPORT_DIMS ? Int32Array.of(30, 30) : real(name));
-    const live = new Live(canvas, async () => clip());
+    const live = new Live(canvas);
     const advice = ". Set a smaller angle, a shorter duration or a smaller scale.";
     expect(await problem(live.show(SOURCE, { angle: "30" }, 0))).toEqual({
       message: "The live view can't draw frames this large on this GPU: a slice of 38 × 24 "
@@ -304,21 +295,53 @@ describe("Live", () => {
     live.dispose();
   });
 
-  test("turns a file it can't read into a problem", async () => {
-    const { live } = make(async () => new File(["not a video"], "notes.mp4"));
-    expect(await problem(live.show(SOURCE, {}, 0)))
-      .toEqual({ message: "can't read a video stream from notes.mp4", kind: "error" });
+  test("keeps the clip for the same file opened again", async () => {
+    const { live } = make();
+    const progress = vi.fn();
+    const first = new File([SOURCE], SOURCE.name);
+    await live.show(first, { angle: "30" }, 0.5, progress);
+    progress.mockClear();
+    const again = new File([SOURCE], SOURCE.name);
+    live.adopt(first, again);
+    await live.show(again, { angle: "40" }, 0.5, progress);
+    expect(progress).not.toHaveBeenCalled();
+    await live.show(first, { angle: "40" }, 0.5, progress);  // now another file
+    expect(progress).toHaveBeenCalledTimes(20);
     live.dispose();
   });
 
-  test("refuses sources outside the server's folders", async () => {
-    const { live, opened } = make();
-    for (const source of ["videos/../webapp.py", "videos/.clip.mp4", "elsewhere/clip.mp4",
-                          "videos/", "videos", ""]) {
-      expect(await problem(live.show(source, {}, 0)), source)
-        .toEqual({ message: "Pick a video first.", kind: "error" });
+  test("says when the file has changed since it was opened", async () => {
+    const { live } = make();
+    const root = await navigator.storage.getDirectory();
+    const handle = await root.getFileHandle("h264-30.mp4", { create: true });
+    const write = async (blob: Blob) => {
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+    };
+    try {
+      await write(SOURCE);
+      const file = await handle.getFile();
+      await live.show(file, { angle: "30" }, 0.5);
+      await write(new Blob([SOURCE, "and more"]));  // as when the video is exported again
+      await live.show(file, { angle: "40" }, 0.5);  // the clip held still serves
+      expect(await problem(live.show(file, { angle: "30", scale: "0.5" }, 0.5))).toEqual({
+        message: "h264-30.mp4 has changed or moved since it was opened: open it, or its folder, "
+          + "again.",
+        kind: "error",
+      });
+    } finally {
+      live.dispose();
+      await root.removeEntry("h264-30.mp4");
     }
-    expect(opened()).toBe(0);
+  });
+
+  test("turns a file it can't read into a problem", async () => {
+    const { live } = make();
+    for (const name of ["notes.mp4", "notes.txt"]) {
+      expect(await problem(live.show(new File(["not a video"], name), {}, 0)))
+        .toEqual({ message: `can't read a video stream from ${name}`, kind: "error" });
+    }
     live.dispose();
   });
 
@@ -336,11 +359,23 @@ describe("Live", () => {
     made.push(canvas);
     // Keep the news from the live view, as a load runs on until the event comes.
     canvas.addEventListener("webglcontextlost", (event) => event.stopImmediatePropagation());
-    const live = new Live(canvas, async () => {
-      canvas.getContext("webgl2")!.getExtension("WEBGL_lose_context")!.loseContext();
-      return clip();
+    const live = new Live(canvas);
+    const showing = live.show(SOURCE, {}, 0);
+    canvas.getContext("webgl2")!.getExtension("WEBGL_lose_context")!.loseContext();  // as it probes
+    expect((await problem(showing)).message).toContain("lost the GPU");
+    live.dispose();
+  });
+
+  test("says the GPU is lost when it goes as the clip decodes", async () => {
+    const canvas = document.createElement("canvas");
+    made.push(canvas);
+    canvas.addEventListener("webglcontextlost", (event) => event.stopImmediatePropagation());
+    const live = new Live(canvas);
+    const lose = canvas.getContext("webgl2")!.getExtension("WEBGL_lose_context")!;
+    const showing = live.show(SOURCE, {}, 0, (done) => {
+      if (done === 1) lose.loseContext();
     });
-    expect((await problem(live.show(SOURCE, {}, 0))).message).toContain("lost the GPU");
+    expect((await problem(showing)).message).toContain("lost the GPU");
     live.dispose();
   });
 
@@ -368,18 +403,14 @@ describe("Live", () => {
   });
 
   test("comes back after losing the GPU", async () => {
-    let opening: () => void = () => {};
-    const opened = new Promise<void>((resolve) => { opening = resolve; });
-    const { live, canvas } = make(async () => {
-      await opened;  // held, so the GPU goes while the clip loads
-      return clip();
-    });
+    const { live, canvas } = make();
     const lose = canvas.getContext("webgl2")!.getExtension("WEBGL_lose_context")!;
-    const loading = live.show(SOURCE, { angle: "30" }, 0.5);
     const lost = new Promise((resolve) => canvas.addEventListener("webglcontextlost", resolve));
-    lose.loseContext();
+    // The GPU goes while the clip decodes, a frame in.
+    const loading = live.show(SOURCE, { angle: "30" }, 0.5, (done) => {
+      if (done === 1) lose.loseContext();
+    });
     await lost;
-    opening();
     expect((await problem(loading)).message).toContain("lost the GPU");
     expect((await problem(live.show(SOURCE, { angle: "30" }, 0.5))).message)
       .toContain("lost the GPU");
@@ -399,32 +430,5 @@ describe("Live", () => {
     expect(after).toEqual(drawn(shown.canvas));
     shown.live.dispose();
     live.dispose();
-  });
-});
-
-describe("fetchSource", () => {
-  const { signal } = new AbortController();
-
-  test("fetches a source from the server's media", async () => {
-    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
-      new Response("the bytes"));
-    const file = await fetchSource("videos/my clip#1?.mp4", signal);
-    expect(fetch).toHaveBeenCalledWith("/media/videos/my%20clip%231%3F.mp4", { signal });
-    expect([file.name, await file.text()]).toEqual(["my clip#1?.mp4", "the bytes"]);
-    await fetchSource("uploads/clip.mp4", signal);
-    expect(fetch).toHaveBeenLastCalledWith("/media/uploads/clip.mp4", { signal });
-  });
-
-  test("says why it can't", async () => {
-    const fetch = vi.spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(new Response("", { status: 404 }))
-      .mockResolvedValueOnce(new Response("", { status: 500 }));
-    expect(await problem(fetchSource("uploads/gone.mp4", signal)))
-      .toEqual({ message: "gone.mp4 isn't in uploads any more.", kind: "error" });
-    expect(await problem(fetchSource("videos/clip.mp4", signal)))
-      .toEqual({ message: "The server said 500.", kind: "error" });
-    expect(await problem(fetchSource("videos/../webapp.py", signal)))
-      .toEqual({ message: "Pick a video first.", kind: "error" });
-    expect(fetch).toHaveBeenCalledTimes(2);
   });
 });

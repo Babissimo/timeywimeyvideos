@@ -22,7 +22,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[2]))
 
 import timeslice  # noqa: E402
-import webapp  # noqa: E402
+import page_options  # noqa: E402
 
 CLIP = HERE / "decode" / "h264-30.mp4"
 SHRINK = timeslice.PREVIEW_SCALE
@@ -48,7 +48,7 @@ def endpoints(sweep, f):
 
 
 def frame(values, pos):
-    opts = webapp.read_options(values)
+    opts = page_options.read_options(values)
     volume, fps = timeslice.load_video(str(CLIP), opts["scale"] * SHRINK, SHRINK,
                                        opts["start"], opts["duration"], fast=True)
     frames = round(opts["loop_fade"] * float(fps) * SHRINK)

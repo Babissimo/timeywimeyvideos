@@ -10,6 +10,8 @@
 <header>
   <h1>timeywimey</h1>
   <span class="muted">slicing through a video's space-time cuboid</span>
+  <p id="unserved">This page runs only when a web server serves it, not opened as a file:
+    README.md says how to serve it.</p>
 </header>
 
 <main>
@@ -18,11 +20,13 @@
       <h2>Source</h2>
       <select id="source" aria-label="Video"></select>
       <label class="drop" id="drop">
-        <input type="file" id="file" accept="video/*,.mkv,.mov">
-        <span>Upload a video, or drop one anywhere on the page</span>
+        <input type="file" id="file" multiple>
+        <span>Open a video, or drop one anywhere on the page</span>
       </label>
-      <div class="bar" id="upload-bar" hidden><div></div></div>
+      <button id="open-folder" class="quiet" hidden>Open a folder of videos</button>
+      <p class="note" id="folder-note"></p>
       <p class="note" id="source-info"></p>
+      <p class="note">Videos stay on this computer: nothing is uploaded.</p>
     </section>
 
     <section class="card">
@@ -157,7 +161,7 @@
       <div class="stage">
         <canvas id="live"></canvas>
         <div class="overlay" id="live-message">
-          <p id="live-text">Pick a video, or upload one.</p>
+          <p id="live-text"></p>
           <button id="live-action" hidden></button>
         </div>
       </div>

@@ -30,7 +30,7 @@ function problem(fn: () => unknown): { message: string; kind: string } {
   return { message, kind };
 }
 
-describe("readOptions matches webapp.read_options", () => {
+describe("readOptions matches page_options.read_options", () => {
   for (const { values, options, error, kind } of cases) {
     test(JSON.stringify(values), () => {
       if (error !== undefined) {
@@ -88,8 +88,7 @@ describe("readOptions reads noise seeds", () => {
   });
 });
 
-// The clip test_webapp.py makes, 64×48 at 20 fps for 3 s: at half size, 30 frames 32 pixels
-// wide.
+// A clip 64×48 at 20 fps for 3 s: 30 frames 32 pixels wide at half size.
 const clip: ClipInfo = { width: 64, height: 48, fps: { num: 20, den: 1 }, duration: 3 };
 const read = (values: Record<string, string | number>) =>
   readOptions(Object.fromEntries(Object.entries(values).map(([k, v]) => [k, String(v)])));

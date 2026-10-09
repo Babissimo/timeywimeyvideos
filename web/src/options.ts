@@ -128,8 +128,8 @@ function pyStr(value: unknown): string {
 const repr = (value: unknown) => typeof value === "string" ? pyRepr(value) : pyStr(value);
 
 /**
- * Read the page's options, as webapp.read_options does: the same defaults, and the same
- * Problem for a value it refuses.
+ * Read the page's options, as read_options in web/test/fixtures/page_options.py does: the same
+ * defaults, and the same Problem for a value it refuses.
  */
 export function readOptions(values: OptionValues): Options {
   function number<T extends number | null>(name: string, fallback: T, low = -Infinity,

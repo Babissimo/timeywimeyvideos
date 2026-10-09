@@ -1,14 +1,26 @@
-// The page for webapp.py: choose a source, set the slice, watch it play live,
-// see where the slice sits in the cuboid, and render it. The live view and the
-// renders are sliced here, on the GPU.
+// The page: open a video, set the slice, watch it play live, see where the
+// slice sits in the cuboid, and render it. The video stays on this computer:
+// the live view and the renders decode and slice it here, on the GPU.
 
-import { fetchSource, Live } from "./src/live.ts";
+import { probe } from "./src/decode.ts";
+import { Live } from "./src/live.ts";
 import { handOver, render as renderClip } from "./src/render.ts";
+import { changed, hasChanged, same, Sources, VIDEO_TYPES } from "./src/sources.ts";
 
 const $ = (id) => document.getElementById(id);
 
+// Why this page can't decode or encode video here, if it can't. WebCodecs, which does both,
+// runs only in a secure context.
+const UNABLE = !window.isSecureContext ?
+  `The page can only decode video in a secure context, which ${location.origin} isn't: ` +
+  "open it at localhost or over HTTPS." :
+  !("VideoDecoder" in window && "VideoEncoder" in window) ?
+  "This browser can't decode or encode video in a page, as it has no WebCodecs. Use a " +
+  "recent Chrome or Edge." : "";
+
 const state = {
-  source: "",
+  source: null,    // the File chosen
+  id: "",          // and its id in the list
   chosen: 0,       // how many times a source has been chosen
   info: null,      // the live view's description of the frame on screen
   pos: 0.5,        // how far through the output video, 0 to 1
@@ -65,7 +77,6 @@ function options() {
   const sides = loop && $("loop-sides").checked;
   const noise = $("noise").checked;
   return {
-    source: state.source,
     slice,
     angle: $("angle").value || "0",
     inside: edges() === "inside" ? "1" : "",
@@ -84,22 +95,6 @@ function options() {
     scale: $("scale").value || "1",
     fps: $("fps").value.trim(),
   };
-}
-
-async function problemFrom(res) {
-  let message = `The server said ${res.status}.`, kind = "error";
-  try {
-    const body = await res.json();
-    message = body.error || message;
-    kind = body.kind || kind;
-  } catch { /* not JSON */ }
-  return Object.assign(new Error(message), { kind });
-}
-
-async function getJSON(url, init) {
-  const res = await fetch(url, init);
-  if (!res.ok) throw await problemFrom(res);
-  return res.json();
 }
 
 function seconds(s) {
@@ -146,7 +141,9 @@ function refresh() {
 async function pump() {
   if (busy || !again) return;
   again = false;
-  if (!state.source) return;
+  const file = state.source;
+  if (!file) return;
+  if (UNABLE) return showMessage(UNABLE);
   busy = true;
   const opts = options();
   // Once another source is chosen, the message is that one's to give.
@@ -160,7 +157,7 @@ async function pump() {
     loading("Loading the clip…");
   }, 300);
   try {
-    const info = await liveView().show(opts.source, opts, state.pos, (done, total) => {
+    const info = await liveView().show(file, opts, state.pos, (done, total) => {
       if (slow) loading(`Loading the clip… ${Math.floor(100 * done / total)}%`);
     });
     const resized = !state.info || state.info.frames !== info.frames;
@@ -370,32 +367,69 @@ $("noise-amount").addEventListener("input", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Sources.
+// Sources: videos opened on this computer, on their own or a folder at a time,
+// which the page reads where they lie as it needs them.
 
-async function loadSources(select) {
-  const data = await getJSON("/api/sources");
+const sources = new Sources();
+const NO_SOURCE = "Open a video, or drop one here.";
+let original = null;  // the address "watch the original" plays the chosen file at
+
+function showSources() {
   const list = $("source");
   list.replaceChildren(new Option("Choose a video…", ""));
-  const folder = data.folder.split(/[\\/]/).filter(Boolean).pop() || data.folder;
-  for (const [label, kind, names] of [[`Folder: ${folder}`, "videos", data.videos],
-                                       ["Uploads", "uploads", data.uploads]]) {
-    if (!names.length) continue;
-    const group = document.createElement("optgroup");
-    group.label = label;
-    for (const name of names) group.append(new Option(name, `${kind}/${name}`));
-    list.append(group);
-  }
-  list.value = select || "";
-  if (!data.videos.length && !data.uploads.length) {
-    $("source-info").textContent = `No videos in ${data.folder} yet. Upload one, ` +
-      "or restart with --videos pointing at a folder of videos.";
-  }
+  if (sources.folder !== null) list.append(group(`Folder: ${sources.folder}`, sources.inFolder));
+  if (sources.opened.length) list.append(group("Opened", sources.opened));
+  list.value = sources.chosen?.id ?? "";
 }
 
-async function chooseSource(source) {
+function group(label, items) {
+  const group = document.createElement("optgroup");
+  group.label = label;
+  const seen = new Map();  // files of the same name from different places are numbered
+  for (const { id, file } of items) {
+    const n = (seen.get(file.name) ?? 0) + 1;
+    seen.set(file.name, n);
+    group.append(new Option(n > 1 ? `${file.name} (${n})` : file.name, id));
+  }
+  if (!items.length) group.append(Object.assign(new Option("No videos"), { disabled: true }));
+  return group;
+}
+
+// A note on the folder, apart from the chosen video's details.
+function folderNote(text, error = false) {
+  $("folder-note").textContent = text;
+  $("folder-note").classList.toggle("error", error);
+}
+
+function describeFolder() {
+  const n = sources.inFolder.length, unreadable = sources.unreadable;
+  folderNote((n ? `${sources.folder} has ${n} video${n === 1 ? "" : "s"}.` :
+    `${sources.folder} has no videos at its top level (${[...VIDEO_TYPES].join(" ")}).`) +
+    (unreadable.length ? ` Couldn't read ${unreadable.join(", ")}.` : ""));
+}
+
+async function chooseSource(id) {
+  const file = sources.choose(id)?.file ?? null;
+  $("source").value = file ? id : "";
+  if (file === state.source) return;
+  // The chosen video opened again, as a new File, takes the place of the File held without
+  // loading afresh while that still reads. Once the file changes or moves it doesn't, and the
+  // video loads again from the new File.
+  const held = state.source;
+  if (file && held && id === state.id && same(held, file)) {
+    const stale = await hasChanged(held);
+    if (state.source !== held || sources.chosen?.file !== file) return;  // chosen again since
+    if (!stale) {
+      live?.adopt(held, file);
+      state.source = file;
+      return;
+    }
+  }
   pause();
-  live?.unload();  // the file may have changed, as an upload of the same name does
-  state.source = source;
+  live?.unload();
+  forgetOriginal();
+  state.source = file;
+  state.id = file ? id : "";
   state.chosen++;
   state.info = null;
   state.pos = 0.5;
@@ -406,62 +440,85 @@ async function chooseSource(source) {
   $("live-info").textContent = "";
   $("frame-label").textContent = "";
   $("estimate").textContent = "";
-  if (!source) {
-    showMessage("Pick a video, or upload one.");
+  if (!file) {
+    showMessage(UNABLE || NO_SOURCE);
     return;
   }
-  try {
-    const info = await getJSON("/api/info?" + new URLSearchParams({ source }));
-    const slash = source.indexOf("/");
-    const [kind, name] = [source.slice(0, slash), source.slice(slash + 1)];
-    // A new address each time, as an upload of the same name replaces the file.
-    const original = () => `/media/${kind}/${encodeURIComponent(name)}?v=${Date.now()}`;
-    $("source-info").replaceChildren(
-      `${info.width}×${info.height} · ${Number(info.fps.toFixed(3))} fps` +
-      (info.duration ? ` · ${seconds(info.duration)}` : "") + ` · ${bytes(info.size)} · `,
-      link("watch the original", () => watch(original(), name)));
-  } catch (err) {
-    $("source-info").textContent = err.message;
-  }
   refresh();
+  const chosen = state.chosen;
+  try {
+    const info = await probe(file);
+    if (state.chosen !== chosen) return;
+    $("source-info").replaceChildren(
+      `${info.width}×${info.height} · ${Number((info.fps.num / info.fps.den).toFixed(3))} fps` +
+      (info.duration ? ` · ${seconds(info.duration)}` : "") + ` · ${bytes(file.size)} · `,
+      link("watch the original", watchOriginal));
+  } catch (err) {
+    const message = await hasChanged(file) ? changed(file.name) : err.message;
+    if (state.chosen === chosen) $("source-info").textContent = message;
+  }
+}
+
+function watchOriginal() {
+  original ??= URL.createObjectURL(state.source);
+  watch(original, state.source.name);
+}
+
+// Let go of the chosen file's address, and stop the player if it plays it.
+function forgetOriginal() {
+  if (!original) return;
+  const player = $("player");
+  if (player.src === original) {
+    player.removeAttribute("src");
+    player.load();
+    player.hidden = true;
+    $("now-playing").textContent = "";
+    markPlaying();
+  }
+  URL.revokeObjectURL(original);
+  original = null;
+}
+
+function openFiles(files) {
+  const id = sources.open(files);
+  if (!id) return;
+  showSources();
+  chooseSource(id);
+}
+
+async function pickFolder() {
+  let folder;
+  try {
+    folder = await window.showDirectoryPicker({ id: "videos", startIn: "videos" });
+  } catch (err) {
+    if (err.name !== "AbortError") folderNote(err.message, true);
+    return;  // else they closed the picker
+  }
+  await openFolder(folder);
+}
+
+async function openFolder(folder) {
+  try {
+    await sources.openFolder(folder);
+  } catch (err) {
+    folderNote(`Couldn't read ${folder.name}: ${err.message}`, true);
+    return;
+  }
+  showSources();
+  describeFolder();
+  // The video chosen stays, but comes afresh if the folder opened again holds a newer copy.
+  const chosen = sources.chosen;
+  if (chosen && chosen.file !== state.source) chooseSource(chosen.id);
 }
 
 $("source").addEventListener("change", () => chooseSource($("source").value));
-
-function upload(file) {
-  const bar = $("upload-bar");
-  bar.hidden = false;
-  bar.firstElementChild.style.width = "0";
-  $("source-info").textContent = `Uploading ${file.name}…`;
-  const xhr = new XMLHttpRequest();
-  xhr.open("POST", "/api/upload");
-  xhr.setRequestHeader("X-Filename", encodeURIComponent(file.name));
-  xhr.setRequestHeader("Content-Type", "application/octet-stream");
-  xhr.upload.onprogress = (e) => {
-    if (e.lengthComputable) bar.firstElementChild.style.width = `${100 * e.loaded / e.total}%`;
-  };
-  xhr.onload = async () => {
-    bar.hidden = true;
-    let body = {};
-    try { body = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
-    if (xhr.status !== 200) {
-      $("source-info").textContent = body.error || `Upload failed (${xhr.status}).`;
-      return;
-    }
-    await loadSources(body.source);
-    chooseSource(body.source);
-  };
-  xhr.onerror = () => {
-    bar.hidden = true;
-    $("source-info").textContent = "Upload failed: lost the connection to the server.";
-  };
-  xhr.send(file);
-}
-
+$("file").accept = ["video/*", ...VIDEO_TYPES].join(",");
 $("file").addEventListener("change", () => {
-  if ($("file").files[0]) upload($("file").files[0]);
+  openFiles([...$("file").files]);
   $("file").value = "";
 });
+$("open-folder").hidden = !("showDirectoryPicker" in window);
+$("open-folder").addEventListener("click", pickFolder);
 document.addEventListener("dragover", (e) => {
   e.preventDefault();
   $("drop").classList.add("over");
@@ -469,10 +526,28 @@ document.addEventListener("dragover", (e) => {
 document.addEventListener("dragleave", (e) => {
   if (!e.relatedTarget) $("drop").classList.remove("over");
 });
-document.addEventListener("drop", (e) => {
+document.addEventListener("drop", async (e) => {
   e.preventDefault();
   $("drop").classList.remove("over");
-  if (e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]);
+  // Everything is taken from the items before the first await: they empty once the event ends.
+  const items = [...e.dataTransfer.items].filter((item) => item.kind === "file");
+  const folders = items.map((item) => item.webkitGetAsEntry?.()?.isDirectory ?? false);
+  const files = items.filter((_, i) => !folders[i]).map((item) => item.getAsFile());
+  // The first folder opens as the folder, where the browser gives its handle.
+  const dropped = items.find((_, i) => folders[i]);
+  const handle = dropped?.getAsFileSystemHandle?.();
+  openFiles(files.filter(Boolean));
+  if (!dropped) return;
+  if (!handle) {
+    folderNote("This browser can't open a dropped folder: " + ("showDirectoryPicker" in window ?
+      "use Open a folder of videos instead." : "open or drop the videos in it instead."));
+    return;
+  }
+  try {
+    await openFolder(await handle);
+  } catch (err) {
+    folderNote(err.message, true);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -768,15 +843,16 @@ const STAGES = {
 };
 
 async function render(preview) {
-  if (!state.source || job) return;
-  const values = options();  // as they are at the click, whatever changes while it fetches
+  const file = state.source;
+  if (!file || job) return;
+  if (UNABLE) return showJob({ error: true, text: UNABLE });
+  const values = options();
   const controller = new AbortController();
   job = controller;
   const began = performance.now();
   const kind = preview ? "preview" : "full-quality render";
-  showJob({ running: true, text: "Fetching the clip…" });
+  showJob({ running: true, text: "Starting…" });
   try {
-    const file = await fetchSource(values.source, controller.signal);
     const made = await renderClip(file, values, {
       preview, signal: controller.signal,
       progress: ({ stage, done, total }) => showJob({
@@ -791,6 +867,7 @@ async function render(preview) {
     watch(item.url, item.name);
   } catch (err) {
     if (err.name === "AbortError") showJob({ text: "Cancelled." });
+    else if (await hasChanged(file)) showJob({ error: true, text: changed(file.name) });
     else if (err.command) showJob({ error: true, text: handOver(err), command: err.command });
     else showJob({ error: true, text: err.message });
   } finally {
@@ -887,7 +964,7 @@ function link(text, onclick) {
   return button;
 }
 
-// Play a video in the player: a source from the server, or a render.
+// Play a video in the player: the chosen file, or a render.
 function watch(url, label) {
   const player = $("player");
   player.hidden = false;
@@ -906,11 +983,13 @@ function markPlaying() {
 
 // ---------------------------------------------------------------------------
 
-async function start() {
+function start() {
+  $("unserved").remove();  // the note for when this script can't run
   slicesChanged();
   noiseChanged();
   showRenders();
-  await loadSources();
+  showSources();
+  showMessage(UNABLE || NO_SOURCE);
 }
 
 start();
