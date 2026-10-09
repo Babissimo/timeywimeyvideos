@@ -12,8 +12,8 @@ export interface Readback {
 }
 
 /**
- * The video's codec, coded size, number of frames, frame rate (as ffprobe's r_frame_rate) and
- * the colour space it is marked with.
+ * The video's codec, coded size, number of frames, frame rate (ffprobe's r_frame_rate, which
+ * probe reports for a constant-rate video) and the colour space it is marked with.
  */
 export async function readBack(video: Blob): Promise<Readback> {
   const input = new Input({ source: new BlobSource(video), formats: ALL_FORMATS });

@@ -16,7 +16,7 @@ export class VideoError extends Error {
   override name = "VideoError";
 }
 
-/** What `probe` finds: the upright size, the nominal frame rate and the length in seconds. */
+/** What `probe` finds: the upright size, the frame rate ffmpeg decodes at and the length in seconds. */
 export interface ClipInfo { width: number; height: number; fps: Rate; duration: number | null }
 
 /**
@@ -32,7 +32,8 @@ export interface LoadOptions {
 /** What `load` delivers: `frames` frames of width x height, at `fps` (the source rate x timeScale). */
 export interface LoadPlan { width: number; height: number; frames: number; fps: Rate }
 
-/** Return the size (turned upright), nominal frame rate and duration (seconds, or null) of a video. */
+/** Return the size (turned upright), the frame rate ffmpeg decodes at and the duration (seconds,
+ * or null) of a video. */
 export async function probe(source: Blob): Promise<ClipInfo> {
   const clip = await open(source);
   try {
@@ -225,8 +226,8 @@ interface Packets {
   first: number; last: number; hidden: boolean[];
   /** How far before its target an MP4 seek compares decode timestamps. */
   seekBack: number;
-  /** The rate ffmpeg paces frames to without the fps filter. */
-  paced: Rate;
+  /** ffprobe's r_frame_rate, from which ffmpeg's demuxer makes up a missing packet duration. */
+  rFrameRate: Rate;
   /** When the file starts, in microseconds: its streams' earliest first timestamp. */
   fileStart: bigint;
   /** How many streams the file holds, of any kind. */
@@ -305,16 +306,16 @@ async function readPackets(clip: Clip, all: boolean, signal?: AbortSignal): Prom
     const rateDts = index ? dts.slice(first, last + 1)
       : isobmff || pts.length <= RATE_PACKETS ? dts : decodeTimestamps(pts.slice(0, RATE_PACKETS));
     const codec = await track.getCodec();
-    const fps = frameRate(rateDts, lengths.slice(first, last + 1), resolution, index?.table ?? null,
-                          defaultDuration, codec);
-    // ffmpeg paces to av_guess_frame_rate: r_frame_rate, or the average rate where that is
-    // under 70 fps and r_frame_rate over 210. An MP4's average is over its sample table;
-    // other containers' is not modelled.
-    let paced = fps;
+    const rFrameRate = frameRate(rateDts, lengths.slice(first, last + 1), resolution,
+                                 index?.table ?? null, defaultDuration, codec);
+    // ffmpeg paces decoded frames to av_guess_frame_rate: r_frame_rate, or the average rate
+    // where that is under 70 fps and r_frame_rate over 210. An MP4's average is over its
+    // sample table; other containers' is not modelled.
+    let fps = rFrameRate;
     const total = index ? lengths.reduce((sum, d) => sum + d, 0) : 0;
-    if (total > 0 && fps.num > 210 * fps.den) {
+    if (total > 0 && rFrameRate.num > 210 * rFrameRate.den) {
       const average = avReduce(BigInt(Math.round(resolution)) * BigInt(lengths.length), BigInt(total), INT_MAX);
-      if (average.num < 70 * average.den) paced = average;
+      if (average.num < 70 * average.den) fps = average;
     }
     const fileStart = await startOf(tracks, isobmff, textStart, starts);
 
@@ -333,7 +334,7 @@ async function readPackets(clip: Clip, all: boolean, signal?: AbortSignal): Prom
     };
     return {
       info, resolution, isobmff, samples, pts, dts, lengths, keys, order, first, last, hidden, seekBack,
-      paced, fileStart, streams,
+      rFrameRate, fileStart, streams,
     };
   } catch (error) {
     if (error instanceof VideoError || signal?.aborted) throw error;
@@ -355,8 +356,8 @@ interface Timeline {
   fileStart: bigint;
   /** How far before its target an MP4 seek compares decode timestamps. */
   seekBack: number;
-  /** The rate ffmpeg paces frames to without the fps filter. */
-  paced: Rate;
+  /** ffprobe's r_frame_rate, from which ffmpeg's demuxer makes up a missing packet duration. */
+  rFrameRate: Rate;
   /** In presentation order: when ffmpeg shows each frame, the timestamp its decoded sample
    * carries here, its packet's duration (0 if the container gives none) and its place in
    * decode order. */
@@ -606,8 +607,8 @@ function chooseFrames(timeline: Timeline, rate: Rate, start?: number, duration?:
 
   // A packet without a duration lasts one frame at r_frame_rate, rounded down, as ffmpeg's
   // demuxer makes one up.
-  const { fps } = timeline.info;
-  const made = Math.floor(resolution * fps.den / fps.num);
+  const { info: { fps }, rFrameRate } = timeline;
+  const made = Math.floor(resolution * rFrameRate.den / rFrameRate.num);
   const lengths = new Map<number, number>();
   for (const k of decoded) lengths.set(k, timeline.lengths[k]! > 0 ? timeline.lengths[k]! : Math.max(made, 1));
 
@@ -631,7 +632,8 @@ function chooseFrames(timeline: Timeline, rate: Rate, start?: number, duration?:
   if (end === undefined) {
     // The last frame ends as ffmpeg's decoder estimates: after its duration, unless that is
     // missing, or a single tick after a step of more than two, which it takes as made up;
-    // then after the step from the frame before, or one frame at the nominal rate.
+    // then after the step from the frame before, or one frame at the rate decoded at, whereas
+    // ffmpeg takes the codec's declared rate, else the stream's average.
     const before = decoded[decoded.indexOf(last) - 1];
     const step = before === undefined ? 0 : starts[last]! - starts[before]!;
     const given = timeline.lengths[last]! > 0 ? timeline.lengths[last]! : made;
@@ -644,15 +646,14 @@ function chooseFrames(timeline: Timeline, rate: Rate, start?: number, duration?:
   if (rate.num === fps.num && rate.den === fps.den) {
     // Without the fps filter ffmpeg paces to av_guess_frame_rate. Its switch to an H.264
     // or HEVC stream's declared rate is not modelled.
-    // In output frames to 1/2^bits of a frame (2^bits × paced.num within 2^29, bits at
+    // In output frames to 1/2^bits of a frame (2^bits × fps.num within 2^29, bits at
     // most 16), then 2^-17 further from 0 unless whole, as ffmpeg times them.
-    const { paced } = timeline;
-    const bits = Math.min(Math.max(29 - Math.floor(Math.log2(paced.num)), 0), 16);
+    const bits = Math.min(Math.max(29 - Math.floor(Math.log2(fps.num)), 0), 16);
     for (const k of window) {
-      let at = Number(rescale(BigInt(starts[k]!) + offset, BigInt(paced.num) << BigInt(bits),
-                              res * BigInt(paced.den))) / 2 ** bits;
+      let at = Number(rescale(BigInt(starts[k]!) + offset, BigInt(fps.num) << BigInt(bits),
+                              res * BigInt(fps.den))) / 2 ** bits;
       if (at !== Math.round(at)) at += Math.sign(at) / 2 ** 17;
-      timed.push({ frame: k, at, length: lengths.get(k)! * (1 / resolution) / (paced.den / paced.num) });
+      timed.push({ frame: k, at, length: lengths.get(k)! * (1 / resolution) / (fps.den / fps.num) });
     }
   } else {
     const tick = (pts: bigint) => rescale(pts, BigInt(rate.num), res * BigInt(rate.den));
