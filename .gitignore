@@ -6,6 +6,9 @@ __pycache__/
 *.mkv
 *.webm
 *.gif
+# except the tiny clips the browser tests decode
+!web/test/fixtures/**/*.mp4
+!web/test/fixtures/**/*.webm
 
 # web front end
 videos/
