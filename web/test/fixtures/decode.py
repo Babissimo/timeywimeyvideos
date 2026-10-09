@@ -115,6 +115,29 @@ def vfr600(late):
 VFR2400 = ["-vf", f"loop=loop=2:size={FRAMES},settb=1/2400,setpts='N*10+10*gte(N,30)'",
            *PASSTHROUGH, "-enc_time_base", "1/2400", "-video_track_timescale", "2400"]
 
+# About 30 fps at a time base of 1/1000, each frame up to 8 ms early or late: too uneven for
+# any standard rate, so ffmpeg takes the rate the codec declares, if the time base can count
+# it, or else the time base, whose 1000 fps sends it to the average rate.
+UNEVEN_MS = ["-vf", "settb=1/1000,setpts='N*33+trunc(8*sin(N*2.3))'", *PASSTHROUGH,
+             "-enc_time_base", "1/1000", "-video_track_timescale", "1000"]
+# The same at a time base of 1/600, as phones write.
+UNEVEN_600 = ["-vf", "settb=1/600,setpts='N*20+trunc(5*sin(N*2.3))'", *PASSTHROUGH,
+              "-enc_time_base", "1/600", "-video_track_timescale", "600"]
+FRAGMENTED = ["-movflags", "+frag_keyframe+empty_moov"]
+# Without B-frames, as browsers record.
+H264_NO_B = ["-c:v", "libx264", "-preset", "medium", "-crf", "12", "-g", "12", "-bf", "0"]
+# x264 declares the time base's rate for timestamps passed through, unless told the frames
+# come at a constant 30 fps.
+H264_DECLARED_30 = ["-c:v", "libx264", "-preset", "medium", "-crf", "12", "-g", "12", "-bf", "3",
+                    "-x264-params", "b-adapt=0:force-cfr=1:fps=30"]
+# x265 declares the input's 30 fps; Apple's encoder, like x265 told not to, declares none.
+X265 = ["-c:v", "libx265", "-preset", "medium", "-crf", "12", "-g", "12", "-bf", "3", "-tag:v", "hvc1"]
+HEVC = [*X265, "-x265-params", "log-level=error"]
+HEVC_UNTIMED = [*X265, "-x265-params", "log-level=error:vui-timing-info=0"]
+# The frames three times over at 240 fps and a time base of 1/1000, the stream stating 30.
+AT_240 = ["-vf", f"loop=loop=2:size={FRAMES},settb=1/1000,setpts='trunc(N*25/6+0.5)'", *PASSTHROUGH,
+          "-enc_time_base", "1/1000"]
+
 
 def ffmpeg(*args, input=None):
     subprocess.run(["ffmpeg", "-v", "error", "-y", *map(str, args)], input=input, check=True)
@@ -188,6 +211,19 @@ def without_default_durations(src, dst):
     Path(dst).write_bytes(data)
 
 
+def default_duration(ns):
+    """Set the first track's DefaultDuration to `ns` nanoseconds, in the bytes it already has."""
+    def step(src, dst):
+        data = bytearray(Path(src).read_bytes())
+        clusters = data.index(bytes([0x1f, 0x43, 0xb6, 0x75]))
+        at = data.find(bytes([0x23, 0xe3, 0x83]), 0, clusters)
+        assert at >= 0 and data[at + 3] & 0x80, "a DefaultDuration with a one-byte size"
+        size = data[at + 3] & 0x7f
+        data[at + 4:at + 4 + size] = ns.to_bytes(size, "big")
+        Path(dst).write_bytes(data)
+    return step
+
+
 def add_empty_audio(src, dst):
     """Add an audio stream with no packets, which ffmpeg gives no start time.
     A fragmented MP4 keeps it, where a plain one would leave it out."""
@@ -233,6 +269,19 @@ CLIPS = {
     "vp9-opus-stall.webm": (Fraction(30), VP9 + STALL, "yuv420p", add_audio("libopus"),
                             without_default_durations),
     "h264-ts60.mp4": (Fraction(30), H264 + TS60, "yuv420p"),
+    # The 1000 fps declared is too fine for the time base, so ffmpeg takes the time base, and
+    # the average.
+    "h264-uneven.mp4": (Fraction(30), H264 + UNEVEN_MS, "yuv420p"),
+    # The same, the average over the fragments.
+    "h264-uneven-frag.mp4": (Fraction(30), H264_NO_B + UNEVEN_MS + FRAGMENTED, "yuv420p"),
+    # ffmpeg takes the 30 fps declared, doubled as H.264 counts fields.
+    "h264-uneven-30.mp4": (Fraction(30), H264_DECLARED_30 + UNEVEN_MS, "yuv420p"),
+    # ffmpeg takes the 30 fps declared.
+    "hevc-uneven-30.mp4": (Fraction(30), HEVC + UNEVEN_MS, "yuv420p"),
+    # ffmpeg takes the time base, 600 fps, and paces to the average.
+    "hevc-uneven-untimed.mp4": (Fraction(30), HEVC_UNTIMED + UNEVEN_600, "yuv420p"),
+    # ffmpeg judges 240 fps from the timestamps and paces to the 4 fps the default duration gives.
+    "vp9-240-at-4.webm": (Fraction(30), VP9 + AT_240, "yuv420p", default_duration(250_000_000)),
 }
 
 
@@ -336,6 +385,15 @@ def option_sets(name, rate, tick):
         return [{}, {"start": 0.1}, {"duration": 0.7}, {"time_scale": 0.5}]
     if name == "h264-ts60.mp4":
         return [{}, {"time_scale": 0.5}, {"start": 0.51}]
+    if name == "h264-uneven-30.mp4":
+        # Passing frames through, ffmpeg paces to the 30 fps declared rather than the 60 it
+        # reports, which timeslice.probe can't see: only rates the fps filter sets are tried.
+        return [{"time_scale": 0.5}, {"start": 0.51, "time_scale": 0.25}]
+    if name in ("h264-uneven.mp4", "h264-uneven-frag.mp4", "hevc-uneven-30.mp4",
+                "hevc-uneven-untimed.mp4"):
+        return [{}, {"time_scale": 0.5}, {"start": 0.51, "duration": 0.5}]
+    if name == "vp9-240-at-4.webm":
+        return [{}, {"time_scale": 2}, {"start": 0.1}]
     return [
         {},
         {"fast": True},
