@@ -102,12 +102,18 @@ TS60 = ["-vf", f"loop=loop=1:size={FRAMES},settb=1/60,setpts='if(lt(N,45),2*N,90
 
 
 def vfr600(late):
-    """The frames twice over at a time base of 1/600, as phones and screen recorders
+    """The frames three times over at a time base of 1/600, as phones and screen recorders
     write, the step to frame 30 lasting 25 ticks and to frame `late` 27: ffmpeg judges
     the rate from the first 99 frames, and paces to the average rate where it judges
     one over 210 fps."""
     return ["-vf", f"loop=loop=2:size={FRAMES},settb=1/600,setpts='N*20+5*gte(N,30)+7*gte(N,{late})'",
             *PASSTHROUGH, "-enc_time_base", "1/600", "-video_track_timescale", "600"]
+
+
+# The frames three times over at 240 fps and a time base of 1/2400, frame 30 a frame late:
+# ffmpeg judges 240 fps and, the average staying over 70, paces to that.
+VFR2400 = ["-vf", f"loop=loop=2:size={FRAMES},settb=1/2400,setpts='N*10+10*gte(N,30)'",
+           *PASSTHROUGH, "-enc_time_base", "1/2400", "-video_track_timescale", "2400"]
 
 
 def ffmpeg(*args, input=None):
@@ -222,6 +228,7 @@ CLIPS = {
     "h264-long-tail.mp4": (Fraction(30), LONG_TAIL, "yuv420p", lengthen_last),
     "h264-vfr600.mp4": (Fraction(30), H264 + vfr600(55), "yuv420p"),
     "h264-vfr600-240.mp4": (Fraction(30), H264 + vfr600(40), "yuv420p"),
+    "h264-vfr2400.mp4": (Fraction(30), H264 + VFR2400, "yuv420p"),
     "h264-cut-aac.mp4": (Fraction(30), H264, "yuv420p", add_audio("aac"), cut(0.51, 0.5)),
     "vp9-opus-stall.webm": (Fraction(30), VP9 + STALL, "yuv420p", add_audio("libopus"),
                             without_default_durations),
@@ -316,6 +323,9 @@ def option_sets(name, rate, tick):
     if name in ("h264-vfr600.mp4", "h264-vfr600-240.mp4"):
         return [{"scale": 0.5}, {"scale": 0.5, "time_scale": 0.5},
                 {"scale": 0.5, "start": 1.0, "duration": 1.0}]
+    if name == "h264-vfr2400.mp4":
+        return [{"scale": 0.5}, {"scale": 0.5, "time_scale": 0.5},
+                {"scale": 0.5, "start": 0.1, "duration": 0.1}]
     if name == "h264-cut-aac.mp4":
         # Frames shown before the edit or from its end on are decoded but not output.
         return [{}, {"start": 0.1}, {"start": 0.2, "duration": 0.15},
