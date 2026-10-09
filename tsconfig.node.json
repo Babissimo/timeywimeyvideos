@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.json",
+  // The only files that run in Node, and so the only ones that see its types.
+  "compilerOptions": { "types": ["node", "vite/client"] },
+  "include": ["web/src/**/*.test.ts", "vite.config.ts", "vitest.config.ts"],
+  "exclude": ["web/src/**/*.browser.test.ts"]
+}

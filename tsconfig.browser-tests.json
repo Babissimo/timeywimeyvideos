@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  // Browser tests need their own config because tsc's exclude beats its include.
+  "include": ["web/src/**/*.browser.test.ts"],
+  "exclude": []
+}
