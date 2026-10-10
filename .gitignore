@@ -9,6 +9,7 @@ __pycache__/
 # except the tiny clips the browser tests decode
 !web/test/fixtures/**/*.mp4
 !web/test/fixtures/**/*.webm
+!web/test/fixtures/**/*.mkv
 
 # local clips and renders
 videos/
