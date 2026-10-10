@@ -177,6 +177,9 @@ H264_DECLARED_24 = [*H264_NO_B, "-x264-params", "force-cfr=1:fps=24"]
 HEVC_DECLARED_24 = [*X265, "-x265-params", "log-level=error:fps=24"]
 GRID_4MS = ["-vf", "settb=1/1000,setpts='N*32+4*trunc(2*sin(N*2.3))'", *PASSTHROUGH,
             "-enc_time_base", "1/1000"]
+# Movie fragments behind a segment index, as DASH serves them. The index moves the fragments
+# down the file, so their data offsets must count from each fragment's start.
+INDEXED = ["-movflags", "+frag_keyframe+empty_moov+default_base_moof+global_sidx"]
 
 
 def ffmpeg(*args, input=None):
@@ -191,28 +194,31 @@ def rotate(degrees, *keep):
                                    *BITEXACT, *keep, dst)
 
 
-def add_audio(codec, video_offset=None):
+def add_audio(codec, video_offset=None, seconds=1.7, flags=(), sound_offset=None):
     """Add a second stream, which changes how ffmpeg paces the frames it
     outputs. AAC's priming samples put the audio's first timestamp just before
     0; Opus in Matroska records its delay instead. With video_offset the video
-    starts that many seconds after the audio."""
+    starts that many seconds after the audio, and with sound_offset the other
+    way about. The sound lasts `seconds`, and `flags` go to the muxer."""
     offset = [] if video_offset is None else ["-itsoffset", video_offset]
-    sine = "sine=frequency=440:duration=1.7:sample_rate=44100"
-    return lambda src, dst: ffmpeg(*offset, "-i", src, "-f", "lavfi", "-i", sine, "-map", "0:v",
-                                   "-map", "1:a", "-c:v", "copy", "-c:a", codec, "-b:a", "16k",
-                                   *BITEXACT, dst)
+    late = [] if sound_offset is None else ["-itsoffset", sound_offset]
+    sine = f"sine=frequency=440:duration={seconds}:sample_rate=44100"
+    return lambda src, dst: ffmpeg(*offset, "-i", src, *late, "-f", "lavfi", "-i", sine,
+                                   "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", codec,
+                                   "-b:a", "16k", *flags, *BITEXACT, dst)
 
 
-def add_subtitles(video_offset=None):
-    """Add a WebVTT stream from 0, which ffmpeg counts and Mediabunny doesn't list,
-    the video starting video_offset seconds later."""
+def add_subtitles(video_offset=None, until=1.0, codec="webvtt"):
+    """Add a subtitle stream from 0, which ffmpeg counts and Mediabunny doesn't list,
+    the video starting video_offset seconds later. Its one cue lasts until `until`
+    seconds, and `codec` encodes it."""
     offset = [] if video_offset is None else ["-itsoffset", video_offset]
 
     def step(src, dst):
         cues = dst.with_suffix(".vtt")
-        cues.write_text("WEBVTT\n\n00:00.000 --> 00:01.000\nhello\n")
+        cues.write_text(f"WEBVTT\n\n00:00.000 --> 00:{until:06.3f}\nhello\n")
         ffmpeg(*offset, "-i", src, "-i", cues, "-map", "0:v", "-map", "1:s", "-c:v", "copy",
-               "-c:s", "webvtt", *BITEXACT, dst)
+               "-c:s", codec, *BITEXACT, dst)
         cues.unlink()
     return step
 
@@ -262,6 +268,19 @@ def default_duration(ns):
         data[at + 4:at + 4 + size] = ns.to_bytes(size, "big")
         Path(dst).write_bytes(data)
     return step
+
+
+def repeat_track_id(src, dst):
+    """Give the second track the first's ID, which ffmpeg reads past."""
+    data = bytearray(Path(src).read_bytes())
+    ids = []
+    at = data.find(b"tkhd")
+    while at >= 0:
+        ids.append(at + 4 + (20 if data[at + 4] else 12))
+        at = data.find(b"tkhd", at + 4)
+    assert len(ids) == 2, "two track headers, and no lookalike in the media"
+    data[ids[1]:ids[1] + 4] = data[ids[0]:ids[0] + 4]
+    Path(dst).write_bytes(data)
 
 
 def add_empty_audio(src, dst):
@@ -375,6 +394,26 @@ CLIPS = {
     # Two blocks give ffmpeg no average, so it keeps the 60 fps of the fields.
     "h264-30-two.mkv": (Fraction(30), H264_DECLARED_30 + UNEVEN_MS + ["-frames:v", "2"], "yuv420p",
                         without_default_durations),
+    # With B-frames, ffmpeg ends the fragments' video where their decode times run to, short of
+    # the end of the frame shown last.
+    "h264-uneven-frag-bf.mp4": (Fraction(30), H264 + UNEVEN_MS + FRAGMENTED, "yuv420p"),
+    # The same behind a segment index, whose span ffmpeg takes for the video's instead.
+    "h264-uneven-sidx.mp4": (Fraction(30), H264 + UNEVEN_MS + INDEXED, "yuv420p"),
+    # The same beside half a second of sound from 0: the video, starting later, ends last.
+    "h264-uneven-frag-aac.mp4": (Fraction(30), H264 + UNEVEN_MS, "yuv420p",
+                                 add_audio("aac", seconds=0.5, flags=FRAGMENTED)),
+    # Half a second of sound from 0.7 s shares the video's track ID; ffmpeg starts and ends the
+    # file with the video all the same.
+    "h264-aac-same-id.mp4": (Fraction(30), H264, "yuv420p",
+                             add_audio("aac", seconds=0.5, sound_offset=0.7), repeat_track_id),
+    # ffmpeg ends the file with a subtitle stream ending less than a second after the video,
+    # which starts half a second after it.
+    "h264-subs-end.mp4": (Fraction(30), H264, "yuv420p",
+                          add_subtitles(video_offset=0.5, until=2.5, codec="mov_text")),
+    # Starting the file with the video, over a second after the subtitles, ffmpeg takes the
+    # subtitles' duration, less than a second longer than the video's.
+    "h264-subs-long.mp4": (Fraction(30), H264, "yuv420p",
+                           add_subtitles(video_offset=1.5, until=2.0, codec="mov_text")),
 }
 
 
@@ -523,6 +562,12 @@ def option_sets(name, rate, tick):
         return [{}, {"time_scale": 0.5}]
     if name == "h264-30-two.mkv":
         return [{}]
+    if name in ("h264-uneven-frag-bf.mp4", "h264-uneven-sidx.mp4", "h264-uneven-frag-aac.mp4"):
+        return [{}, {"time_scale": 0.5}, {"start": 0.51, "duration": 0.5}]
+    if name == "h264-aac-same-id.mp4":
+        return [{}]
+    if name in ("h264-subs-end.mp4", "h264-subs-long.mp4"):
+        return [{}, {"start": 0.51}]
     return [
         {},
         {"fast": True},

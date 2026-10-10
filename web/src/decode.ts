@@ -8,7 +8,7 @@ import {
   UnsupportedInputFormatError, VideoSample, VideoSampleSink, type InputTrack, type InputVideoTrack,
 } from "mediabunny";
 import { avcFrameRate } from "./avc";
-import { readMatroska, readMp4, type Mp4Track } from "./container";
+import { isText, readMatroska, readMp4, type Mp4Track } from "./container";
 import { hevcFrameRate } from "./hevc";
 import { gcd, limitDenominator, roundHalfEven } from "./pymath";
 import type { Rate } from "./types";
@@ -279,7 +279,7 @@ async function readPackets(clip: Clip, all: boolean, signal?: AbortSignal): Prom
     // for instance an MPEG-TS stream of subtitles or data, and its start.
     let streams = tracks.length;
     let textStart: number | null = null;
-    let starts: Map<number, Mp4Track> | undefined;
+    let movie: Map<number, Mp4Track> | undefined;
     let index: MovIndex | undefined;
     let seekBack = 0;
     const codec = await track.getCodec();
@@ -291,7 +291,7 @@ async function readPackets(clip: Clip, all: boolean, signal?: AbortSignal): Prom
     if (isobmff) {
       const header = await readMp4(source, track.id);
       const video = header.tracks.get(track.id);
-      ({ streams, textStart, tracks: starts } = header);
+      ({ streams, textStart, tracks: movie } = header);
       const counted = video?.counted;
       if (counted && counted.samples > 0 && counted.duration > 0) {
         average = avReduce(BigInt(Math.round(resolution)) * BigInt(counted.samples), BigInt(counted.duration),
@@ -379,17 +379,28 @@ async function readPackets(clip: Clip, all: boolean, signal?: AbortSignal): Prom
       const mean = span > 0 ? limitDenominator((shown.length - 1) * resolution / span, 1001) : null;
       if (mean && mean.num > 0 && 2 * mean.num * paced.den <= paced.num * mean.den) fps = mean;
     }
-    const fileStart = await startOf(tracks, isobmff, textStart, starts);
+    // Where an MP4 repeats a track ID, its header can't say which of those tracks Mediabunny
+    // lists, and Mediabunny's measures stand.
+    const distinct = movie?.size === streams ? movie : undefined;
+    // One at a time: Mediabunny keeps only the last movie fragment it read.
+    const starts: (bigint | null)[] = [];
+    for (const each of tracks) starts.push(await trackStart(each, isobmff, distinct));
+    const fileStart = startOf(starts, textStart);
 
     const rotation = await track.getRotation();
     const [codedWidth, codedHeight] = [await track.getCodedWidth(), await track.getCodedHeight()];
     const turned = rotation % 180 !== 0;
-    let duration = await input.getDurationFromMetadata();
-    const stated = format instanceof MatroskaInputFormat && duration !== null;
-    duration ??= await input.computeDuration();
-    // ffmpeg takes a Matroska header's duration as it stands, and otherwise measures
-    // from the file's start to its end.
-    if (!stated) duration -= Number(fileStart) / 1e6;
+    // ffmpeg times an MP4 by its tracks' durations, takes a Matroska header's duration as it
+    // stands, and otherwise measures from the file's start to its end.
+    let duration: number;
+    const timed = distinct ? timedLength(tracks, starts, fileStart, distinct) : null;
+    if (timed !== null) {
+      duration = Number(timed) / 1e6;
+    } else {
+      const stated = await input.getDurationFromMetadata();
+      duration = stated !== null && format instanceof MatroskaInputFormat ? stated
+        : (stated ?? await input.computeDuration()) - Number(fileStart) / 1e6;
+    }
     const info: ClipInfo = {
       width: turned ? codedHeight : codedWidth, height: turned ? codedWidth : codedHeight, fps,
       duration: Number.isFinite(duration) && duration > 0 ? duration : null,
@@ -444,44 +455,75 @@ async function readTimeline(clip: Clip, signal?: AbortSignal): Promise<Timeline>
   };
 }
 
-/** When a file starts, in microseconds: the earliest of its streams' first timestamps,
- * as ffmpeg takes them, given the earliest start of its subtitle and data streams and,
- * for an MP4, when its header starts each track. */
-async function startOf(tracks: InputTrack[], isobmff: boolean, textStart: number | null,
-                       header?: Map<number, Mp4Track>): Promise<bigint> {
+/** When ffmpeg starts a stream, in microseconds: at its first timestamp, or where the header
+ * starts an MP4 track with samples there. Null for a stream without packets. */
+async function trackStart(track: InputTrack, isobmff: boolean,
+                          header?: Map<number, Mp4Track>): Promise<bigint | null> {
+  const stated = header?.get(track.id)?.start;
+  if (stated !== undefined && stated !== null) return BigInt(stated);
+  let first: number;
+  let res: number;
+  try {
+    const packet = await new EncodedPacketSink(track).getFirstPacket({ metadataOnly: true });
+    // ffmpeg has no start time for a stream without packets.
+    if (!packet) return null;
+    res = await track.getTimeResolution();
+    first = Math.round(packet.timestamp * res);
+  } catch {
+    // A stream Mediabunny can't read has no start time either.
+    return null;
+  }
+  // ffmpeg starts an MP4 stream at its edit list, so AAC priming before 0 doesn't count.
+  // A Matroska Opus track's CodecDelay moves its packets earlier in ffmpeg but not its
+  // start, to which ffmpeg adds the samples it will skip.
+  if (isobmff) first = Math.max(first, 0);
+  return rescale(BigInt(first), MICRO, BigInt(Math.round(res)));
+}
+
+/** When a file starts, in microseconds: the earliest of its streams' starts, ignoring those
+ * without one, given the earliest start of its subtitle and data streams. */
+function startOf(starts: (bigint | null)[], textStart: number | null): bigint {
   let start: bigint | null = null;
-  for (const track of tracks) {
-    const stated = header?.get(track.id)?.start;
-    if (stated !== undefined && stated !== null) {
-      if (start === null || BigInt(stated) < start) start = BigInt(stated);
-      continue;
-    }
-    let first: number;
-    let res: number;
-    try {
-      const packet = await new EncodedPacketSink(track).getFirstPacket({ metadataOnly: true });
-      // ffmpeg ignores a stream without packets, having no start time for it.
-      if (!packet) continue;
-      res = await track.getTimeResolution();
-      first = Math.round(packet.timestamp * res);
-    } catch {
-      // A stream Mediabunny can't read has no start time either.
-      continue;
-    }
-    // ffmpeg starts an MP4 stream at its edit list, so AAC priming before 0 doesn't count.
-    // A Matroska Opus track's CodecDelay moves its packets earlier in ffmpeg but not its
-    // start, to which ffmpeg adds the samples it will skip.
-    if (isobmff) first = Math.max(first, 0);
-    const us = rescale(BigInt(first), MICRO, BigInt(Math.round(res)));
-    if (start === null || us < start) start = us;
+  for (const us of starts) if (us !== null && (start === null || us < start)) start = us;
+  // Mediabunny lists no subtitle or data streams.
+  return withText(start, textStart === null ? null : BigInt(textStart), -1n) ?? 0n;
+}
+
+/** The other streams' start, end or duration, `main`, or a subtitle or data stream's, `text`,
+ * where ffmpeg takes that instead: when the others have none, or when it is less than a second
+ * past theirs, later for `past` 1 and earlier for -1. */
+function withText(main: bigint | null, text: bigint | null, past: 1n | -1n): bigint | null {
+  if (main === null || text === null) return main ?? text;
+  const gap = (text - main) * past;
+  return gap > 0n && gap < MICRO ? text : main;
+}
+
+/** How long ffmpeg takes an MP4 to last from its streams' durations, given its header's
+ * tracks, in microseconds: from the file's start to where the last stream ends, its duration
+ * after its own start, or the longest duration if that is more. Mediabunny lists the video
+ * and audio, which start as given; a subtitle or data track starts only where the header
+ * starts it, so not at all where its samples are all in fragments, though ffmpeg starts it at
+ * the first it reads. Null if the header holds none of the streams. */
+function timedLength(tracks: InputTrack[], starts: (bigint | null)[], fileStart: bigint,
+                     header: Map<number, Mp4Track>): bigint | null {
+  const later = (a: bigint | null, b: bigint) => a === null || b > a ? b : a;
+  let [end, longest, textEnd, textLongest]: (bigint | null)[] = [null, null, null, null];
+  for (const [i, track] of tracks.entries()) {
+    const duration = header.get(track.id)?.duration;
+    if (duration === undefined) continue;
+    const start = starts[i] ?? null;
+    if (start !== null) end = later(end, start + BigInt(duration));
+    longest = later(longest, BigInt(duration));
   }
-  // ffmpeg takes a subtitle or data stream's start only when it is less than a second
-  // before the others' (or they have none). Mediabunny lists no such streams.
-  if (textStart !== null) {
-    const text = BigInt(textStart);
-    if (start === null || (start > text && start - text < MICRO)) start = text;
+  for (const { handler, start, duration } of header.values()) {
+    if (!isText(handler)) continue;
+    if (start !== null) textEnd = later(textEnd, BigInt(start + duration));
+    textLongest = later(textLongest, BigInt(duration));
   }
-  return start ?? 0n;
+  end = withText(end, textEnd, 1n);
+  longest = withText(longest, textLongest, 1n);
+  if (longest === null) return null;
+  return end !== null && end - fileStart > longest ? end - fileStart : longest;
 }
 
 /** Decode indices sorted by presentation timestamp. */
