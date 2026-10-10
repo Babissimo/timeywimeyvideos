@@ -55,16 +55,37 @@ class VideoError(RuntimeError):
 
 def probe(path):
     """Return (width, height, frame rate, duration in seconds or None). The
-    frame rate is the one ffmpeg decodes the video at."""
+    frame rate is the one ffmpeg paces decoded frames to, or where that is
+    over 210 fps and at least twice the mean rate of the first frames shown,
+    that mean."""
+    return _probe(path)[:4]
+
+
+class _Probed(NamedTuple):
+    width: int
+    height: int
+    fps: Fraction
+    duration: float | None
+    paced: Fraction  # the rate ffmpeg paces decoded frames to without the fps filter
+
+
+# The mean rate is over the first RATE_FRAMES frames shown, as many as ffmpeg
+# judges a frame rate from. They are among the first RATE_FRAMES + REORDER
+# packets, as H.264 and HEVC hold back at most 16 frames to show in order.
+RATE_FRAMES = 41
+REORDER = 16
+
+
+def _probe(path):
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=width,height,r_frame_rate,avg_frame_rate"
-                          ":stream_tags=rotate"
-                          ":stream_side_data=rotation:format=duration",
-         "-of", "json", path],
+         "-show_entries", "stream=width,height,time_base:stream_tags=rotate"
+                          ":stream_side_data=rotation:format=duration:packet=pts,flags",
+         "-read_intervals", f"%+#{RATE_FRAMES + REORDER}", "-of", "json", path],
         capture_output=True, text=True)
-    info = json.loads(out.stdout or "{}")
-    if out.returncode != 0 or not info.get("streams"):
+    # Output cut short by a failure is no JSON.
+    info = json.loads(out.stdout or "{}") if out.returncode == 0 else {}
+    if not info.get("streams"):
         raise VideoError(f"can't read a video stream from {path}")
     stream = info["streams"][0]
     width, height = stream["width"], stream["height"]
@@ -77,18 +98,51 @@ def probe(path):
     if abs(int(float(rotation))) % 180 == 90:
         width, height = height, width
 
-    # ffmpeg paces decoded frames to av_guess_frame_rate: r_frame_rate, unless
-    # that is over 210 fps and the average under 70, as in variable-rate MP4s
-    # at a time base of 1/600, when it is the average.
-    fps = Fraction(stream["r_frame_rate"])
-    num, den = map(int, stream.get("avg_frame_rate", "0/0").split("/"))
-    average = Fraction(num, den) if den else Fraction(0)
-    if fps > 210 and 0 < average < 70:
-        fps = average
+    fps = paced = _paced_rate(path)
+    # For want of anything better ffmpeg paces to the time base, or a rate an
+    # encoder declared from it, as with a browser's WebM recording. Over 210
+    # fps that is no frame rate unless the frames come about that often: where
+    # they average half as often or less, load_video sets their mean rate with
+    # the fps filter instead.
+    if paced > 210:
+        mean = _mean_rate(info.get("packets", []), 1 / Fraction(stream["time_base"]))
+        if mean and mean <= paced / 2:
+            fps = mean
 
     duration = info.get("format", {}).get("duration")
-    return (width, height, fps,
-            float(duration) if duration else None)
+    return _Probed(width, height, fps, float(duration) if duration else None, paced)
+
+
+def _paced_rate(path):
+    """The rate ffmpeg paces decoded frames to when no filter sets one
+    (av_guess_frame_rate), as the inverse of the time base it encodes them in.
+    ffmpeg picks it from r_frame_rate, the average and, for codecs that can
+    count fields such as H.264, the rate the stream declares, which ffprobe
+    doesn't show."""
+    # framecrc is timed as load_video's raw output is wherever ffmpeg has a
+    # rate, which probing always gives it. -fps_mode cfr would match it even
+    # without one, but needs ffmpeg 5.1.
+    out = subprocess.run(
+        ["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-map", "0:v:0", "-frames:v", "1",
+         "-f", "framecrc", "-"],
+        capture_output=True, text=True)
+    for line in out.stdout.splitlines():
+        if line.startswith("#tb 0:"):
+            return 1 / Fraction(line.split(":")[1].strip())
+    sys.stderr.write(out.stderr)  # ffmpeg's reason, as load_video's decoding prints it
+    raise VideoError(f"ffmpeg failed to decode {path}")
+
+
+def _mean_rate(packets, base):
+    """The mean frame rate of the first RATE_FRAMES frames shown among ffprobe's
+    `packets`, by their timestamps (ticks of 1/base s), as the nearest fraction
+    with a denominator of at most 1001; None if they span no time."""
+    # A packet flagged D is decoded but not shown, as before an edit list's start.
+    pts = sorted(p["pts"] for p in packets if "pts" in p and "D" not in p.get("flags", ""))
+    pts = pts[:RATE_FRAMES]
+    if len(pts) < 2 or pts[-1] == pts[0]:
+        return None
+    return Fraction((len(pts) - 1) * float(base) / (pts[-1] - pts[0])).limit_denominator(1001)
 
 
 def clip_seconds(length, start=None, duration=None):
@@ -120,12 +174,12 @@ def load_video(path, scale=1.0, time_scale=1.0, start=None, duration=None,
     (0.5 = every other frame). Returns the array and the input's frame rate.
     fast trades decoding and resizing quality for speed.
     """
-    width, height, fps, length = probe(path)
+    width, height, fps, length, paced = _probe(path)
     width, height = max(1, round(width * scale)), max(1, round(height * scale))
     rate = fps * Fraction(time_scale).limit_denominator(1000)
 
     filters = [f"scale={width}:{height}" + (":flags=neighbor" if fast else "")]
-    if rate != fps:
+    if rate != paced:
         filters.insert(0, f"fps={rate.numerator}/{rate.denominator}")
     cmd = ["ffmpeg", "-v", "error"]
     if fast:
