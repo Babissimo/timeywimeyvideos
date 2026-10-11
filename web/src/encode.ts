@@ -119,17 +119,19 @@ void main() {
 /**
  * Reads what a WebGL2 canvas shows as an I420 frame of even size, the picture in its top left
  * corner and black beyond it, as ffmpeg's pad filter makes it: Y, then Cb and Cr at half size
- * each way, worked out on the GPU.
+ * each way, worked out on the GPU. Each plane's rows are packed tight, as Firefox's VideoFrame
+ * reads them whatever stride a layout gives.
  */
 class Planes {
   readonly data: Uint8Array<ArrayBuffer>;
-  readonly layout: PlaneLayout[];
+  private readonly rows: Uint8Array<ArrayBuffer>;  // a plane as read, rows padded to whole texels
   private readonly gl: WebGL2RenderingContext;
   private readonly picture: WebGLTexture;
   private readonly convert: Program;
   private readonly vao: WebGLVertexArrayObject;
   private readonly targets: { texture: WebGLTexture; framebuffer: WebGLFramebuffer;
-                              width: number; height: number; offset: number }[] = [];
+                              texels: number; width: number; height: number;
+                              offset: number }[] = [];
 
   constructor(gl: WebGL2RenderingContext, width: number, height: number) {
     this.gl = gl;
@@ -139,18 +141,17 @@ class Planes {
     this.convert = program(gl, COVER, I420, { picture: 0 }, ["plane"]);
     this.vao = gl.createVertexArray();
     let offset = 0;
-    this.layout = [];
     for (const [w, h] of [[even(width), even(height)], [even(width) / 2, even(height) / 2],
                           [even(width) / 2, even(height) / 2]]) {
       const texels = Math.ceil(w / 4);
       const texture = dataTexture(gl);
       fill(gl, texture, gl.RGBA8, texels, h, null);
-      this.targets.push({ texture, framebuffer: framebuffer(gl, texture), width: texels,
+      this.targets.push({ texture, framebuffer: framebuffer(gl, texture), texels, width: w,
                           height: h, offset });
-      this.layout.push({ offset, stride: 4 * texels });
-      offset += 4 * texels * h;
+      offset += w * h;
     }
     this.data = new Uint8Array(offset);
+    this.rows = new Uint8Array(4 * this.targets[0].texels * this.targets[0].height);
   }
 
   /** Fill data with the planes of what the canvas shows now. Leaves the scissor test off. */
@@ -163,13 +164,16 @@ class Planes {
     gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, width, height);
     gl.useProgram(this.convert.program);
     gl.bindVertexArray(this.vao);
-    this.targets.forEach(({ framebuffer, width, height, offset }, plane) => {
+    this.targets.forEach(({ framebuffer, texels, width, height, offset }, plane) => {
       gl.uniform1i(this.convert.uniforms.plane, plane);
       gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
-      gl.viewport(0, 0, width, height);
+      gl.viewport(0, 0, texels, height);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
-      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE,
-                    this.data.subarray(offset, offset + 4 * width * height));
+      const stride = 4 * texels;
+      gl.readPixels(0, 0, texels, height, gl.RGBA, gl.UNSIGNED_BYTE,
+                    this.rows.subarray(0, stride * height));
+      for (let y = 0; y < height; y++)
+        this.data.set(this.rows.subarray(stride * y, stride * y + width), offset + width * y);
     });
     gl.bindVertexArray(null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -312,8 +316,7 @@ export class Encoder {
     this.planes.read();
     const { num, den } = this.fps;
     const frame = new VideoFrame(this.planes.data, {
-      format: "I420", codedWidth: this.width, codedHeight: this.height,
-      layout: this.planes.layout, colorSpace: COLOUR_SPACE,
+      format: "I420", codedWidth: this.width, codedHeight: this.height, colorSpace: COLOUR_SPACE,
       timestamp: Math.round(this.frames * den / num * 1e6), duration: Math.round(den / num * 1e6),
     });
     try {

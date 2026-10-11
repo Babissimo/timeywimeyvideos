@@ -51,6 +51,7 @@ const near = (got: number[], expected: number[], within: number) =>
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("Encoder", () => {
@@ -69,6 +70,43 @@ describe("Encoder", () => {
       // colour with the picture's last column and row, at half resolution as 4:2:0 holds it.
       expect(luma(mean(frame, 34, [33, 34], [0, 10]))).toBeLessThanOrEqual(24);
       expect(luma(mean(frame, 34, [0, 14], [25, 26]))).toBeLessThanOrEqual(24);
+    }
+  });
+
+  test("packs each plane's rows tight, as Firefox reads them whatever stride they're given",
+       async () => {
+    const handed: Uint8Array[] = [];
+    const Original = VideoFrame;
+    vi.stubGlobal("VideoFrame", class extends Original {
+      constructor(data: AllowSharedBufferSource, init: VideoFrameBufferInit) {
+        super(data, init);
+        handed.push(Uint8Array.from(data as Uint8Array));
+      }
+    });
+    const [width, height] = [30, 16];  // planes 30 and 15 wide, neither whole RGBA texels
+    const fps = { num: 30, den: 1 };
+    const gl = canvas(width, height);
+    const encoder = await Encoder.open(gl, fps, settings(width, height, fps, false));
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.SCISSOR_TEST);  // a magenta bar down columns 8 to 11
+    gl.scissor(8, 0, 4, height);
+    gl.clearColor(1, 0, 1, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    await encoder.add();
+    await encoder.finish();
+
+    const [data] = handed;
+    expect(data.length).toBe(width * height * 3 / 2);
+    const quarter = width * height / 4;
+    for (const [offset, w, h] of [[0, width, height], [4 * quarter, width / 2, height / 2],
+                                  [5 * quarter, width / 2, height / 2]]) {
+      const row = (y: number) => Array.from(data.subarray(offset + y * w, offset + (y + 1) * w));
+      const first = row(0);
+      // Only the bar's columns differ from black, and every row is the same.
+      expect(first.map((level) => level !== first[0]))
+        .toEqual(first.map((_, x) => x >= 8 * w / width && x < 12 * w / width));
+      for (let y = 1; y < h; y++) expect(row(y)).toEqual(first);
     }
   });
 
