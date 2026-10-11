@@ -66,7 +66,9 @@ different `--scale`.
 
 `web/` holds a page that does what `timeslice.py` does in the browser: it
 decodes the clip, slices it on the GPU and encodes the result there. It is
-built with npm, which comes with [Node.js](https://nodejs.org/). To work on
+online at <https://timeywimey.babissimo.net/>: on every push to `main`,
+`.github/workflows/deploy-pages.yml` builds it and publishes it on GitHub
+Pages. It is built with npm, which comes with [Node.js](https://nodejs.org/). To work on
 it, run
 
 ```sh
