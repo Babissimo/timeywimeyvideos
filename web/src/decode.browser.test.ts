@@ -101,7 +101,8 @@ describe("planLoad and load match load_video", () => {
     const options = loadOptions(c.options);
     if (c.clip.startsWith("hevc-") && !hevc) {
       await expect(load(source, options, (_, bitmap) => bitmap.close())).rejects.toThrow(
-        new VideoError(`can't decode ${c.clip}: the browser has no decoder for its hevc video`));
+        new VideoError(`The browser has no decoder for the hevc video in ${c.clip}. `
+                       + "Convert it to an H.264 MP4 first."));
       return;
     }
     const expected = {
@@ -170,7 +171,7 @@ describe("errors", () => {
         expect(attempt.status).toBe("rejected");
         const error = (attempt as PromiseRejectedResult).reason as Error;
         expect(error).toBeInstanceOf(VideoError);
-        expect(error.message).toMatch(/^can't decode mpeg4\.mp4: the browser has no decoder for/);
+        expect(error.message).toMatch(/^The browser has no decoder for the \S+ video in mpeg4\.mp4\. /);
       }
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("mp4v"));
     } finally {
@@ -185,7 +186,8 @@ describe("errors", () => {
       expect(attempt.status).toBe("rejected");
       const error = (attempt as PromiseRejectedResult).reason as Error;
       expect(error).toBeInstanceOf(VideoError);
-      expect(error.message).toBe("can't read clip.avi: the browser can't open AVI files");
+      expect(error.message).toBe("The browser can't open AVI files such as clip.avi. Convert it "
+                                 + "to an H.264 MP4 first.");
     }
   });
 });

@@ -1,6 +1,6 @@
 /**
- * The page's options in timeslice.py's terms, and what the live view makes of them: how to
- * plan its sweep, how much of a loop to crossfade, and what a full-quality render would make.
+ * The page's options, and what the live view makes of them: how to plan its sweep, how much of
+ * a loop to crossfade, and what a full-quality render would make.
  */
 import { clipSeconds, type ClipInfo } from "./decode";
 import { Noise } from "./noise";
@@ -127,10 +127,7 @@ function pyStr(value: unknown): string {
 
 const repr = (value: unknown) => typeof value === "string" ? pyRepr(value) : pyStr(value);
 
-/**
- * Read the page's options, as read_options in web/test/fixtures/page_options.py does: the same
- * defaults, and the same Problem for a value it refuses.
- */
+/** Read the page's options, or throw the Problem with the first value refused. */
 export function readOptions(values: OptionValues): Options {
   function number<T extends number | null>(name: string, fallback: T, low = -Infinity,
                                            above?: number): number | T {

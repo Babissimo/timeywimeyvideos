@@ -1,6 +1,6 @@
 /**
  * Writing a render: frames drawn on a WebGL2 canvas, encoded as H.264 by WebCodecs and muxed
- * into an MP4 by Mediabunny, as timeslice.open_writer has ffmpeg do with x264.
+ * into an MP4 by Mediabunny.
  */
 import {
   EncodedPacket, EncodedVideoPacketSource, Mp4OutputFormat, Output, StreamTarget,
@@ -14,14 +14,13 @@ import type { Rate } from "./types";
 /** H.264 needs even dimensions, so an odd one gains a black column or row. */
 export const even = (n: number): number => n + (n % 2);
 
-// The quantizer (QP) where the encoder takes one, lower for better quality: 18 for full quality,
-// the number timeslice.py gives x264 as its CRF, though a fixed QP spends more bits than that
-// CRF does. Where it takes none, a variable bitrate of so many bits a pixel a frame, and at
-// least so many a second, as small frames take more a pixel.
+// The quantizer (QP) where the encoder takes one, lower for better quality. Where it takes none,
+// a variable bitrate of so many bits a pixel a frame, and at least so many a second, as small
+// frames take more a pixel.
 const QUANTIZER = { full: 18, preview: 28 };
 const BITS_PER_PIXEL = { full: 0.25, preview: 0.08 };
 const LEAST_BITRATE = 500_000;
-// x264's longest gap between key frames, in frames.
+// The longest gap between key frames, in frames.
 const KEY_INTERVAL = 250;
 
 /** How well to encode: a quantizer, and the variable bitrate in its place where there is none. */
@@ -118,9 +117,9 @@ void main() {
 
 /**
  * Reads what a WebGL2 canvas shows as an I420 frame of even size, the picture in its top left
- * corner and black beyond it, as ffmpeg's pad filter makes it: Y, then Cb and Cr at half size
- * each way, worked out on the GPU. Each plane's rows are packed tight, as Firefox's VideoFrame
- * reads them whatever stride a layout gives.
+ * corner and black beyond it: Y, then Cb and Cr at half size each way, worked out on the GPU.
+ * Each plane's rows are packed tight, as Firefox's VideoFrame reads them whatever stride a
+ * layout gives.
  */
 class Planes {
   readonly data: Uint8Array<ArrayBuffer>;

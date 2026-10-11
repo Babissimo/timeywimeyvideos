@@ -53,10 +53,9 @@ function expectSource(got: Source | null | undefined, id: string, file: File): v
 }
 
 describe("isVideo", () => {
-  test("takes the seven video extensions, in any case", () => {
-    expect([...VIDEO_TYPES].sort()).toEqual([".avi", ".gif", ".m4v", ".mkv", ".mov", ".mp4",
-                                             ".webm"]);
-    for (const name of ["clip.mp4", "CLIP.MOV", "a.b.m4v", "x.Mkv", "y.webm", "z.avi", "w.gif"])
+  test("takes the five video extensions, in any case", () => {
+    expect([...VIDEO_TYPES].sort()).toEqual([".m4v", ".mkv", ".mov", ".mp4", ".webm"]);
+    for (const name of ["clip.mp4", "CLIP.MOV", "a.b.m4v", "x.Mkv", "y.webm"])
       expect(isVideo(name), name).toBe(true);
   });
 

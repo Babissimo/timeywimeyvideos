@@ -1,5 +1,5 @@
 /**
- * The sampler fixture (web/test/fixtures/sampler.py) decoded, and helpers for the GPU
+ * The sampler fixture (web/test/fixtures/sampler.json) decoded, and helpers for the GPU
  * tests that check against it.
  */
 import raw from "../../test/fixtures/sampler.json?raw";

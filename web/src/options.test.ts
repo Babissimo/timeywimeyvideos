@@ -30,7 +30,7 @@ function problem(fn: () => unknown): { message: string; kind: string } {
   return { message, kind };
 }
 
-describe("readOptions matches page_options.read_options", () => {
+describe("readOptions gives the recorded options or problem", () => {
   for (const { values, options, error, kind } of cases) {
     test(JSON.stringify(values), () => {
       if (error !== undefined) {

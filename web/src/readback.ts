@@ -1,6 +1,6 @@
 /**
  * What a rendered MP4 holds, read back for the tests: its coded size, frame count and rate, and
- * small thumbnails of chosen frames, made the way web/test/fixtures/render.py makes them.
+ * small thumbnails of chosen frames, as render.json records them.
  */
 import { ALL_FORMATS, BlobSource, EncodedPacketSink, Input, VideoSampleSink } from "mediabunny";
 import { probe } from "./decode";

@@ -7,96 +7,20 @@ by sweeping a slicing plane through it at an angle, instead of the usual
 For now the plane can be tilted about the **y axis** (the vertical axis of
 the picture).
 
-## Setup
+It runs in the browser, at <https://timeywimey.babissimo.net/>: the page
+decodes a clip, slices it on the GPU and encodes the result there.
 
-You need [uv](https://docs.astral.sh/uv/) and
-[ffmpeg](https://ffmpeg.org/download.html) (which includes `ffprobe`) on your
-`PATH`. The first `uv run` fetches Python and the dependencies pinned in
-`uv.lock`.
-
-The sampling loops are compiled by [numba](https://numba.pydata.org/) the first
-time they run, which takes several seconds. The compiled code is cached in
-`__pycache__/`, so later runs start straight away.
-
-## Usage
-
-```sh
-uv run timeslice.py input.mp4 output.mp4 --angle 30 --preview   # quick look
-uv run timeslice.py input.mp4 output.mp4 --angle 30             # final cut
-```
-
-| option | meaning |
-| --- | --- |
-| `--angle DEG` | tilt of the slicing plane about the y axis (default 45) |
-| `--slice rotate\|shear` | how to read along the tilted plane (default `rotate`; see below) |
-| `--inside` | keep each frame the input's width and entirely inside the video: no black edges |
-| `--motion perpendicular\|time\|longest` | with `--slice rotate --inside`: which way the frame moves (default `longest`); with `--loop-sides`, `time` (default) or `perpendicular` |
-| `--loop` | make a video that loops seamlessly: time runs round in a ring (see below) |
-| `--loop-fade S` | with `--loop`: blend the clip's last S seconds into its first to hide the join (default 0) |
-| `--loop-sides` | with `--loop`: wrap round the picture's sides too, so the frame can move sideways (see below) |
-| `--loop-side-fade PX` | with `--loop-sides`: blend the picture's last PX columns into its first to hide the seam (default 0) |
-| `--noise A` | push each point of the surface up to A frames off the plane with Perlin noise (default 0: flat; see below) |
-| `--noise-size PX` | roughly how far apart the bumps are, in pixels (default 64) |
-| `--noise-speed PX` | how fast the bumps change, in pixels per output frame (default 1; 0 keeps them still) |
-| `--noise-direction time\|perpendicular` | which way the noise pushes points (default `time`) |
-| `--noise-seed N` | which noise pattern to use (default 0) |
-| `--preview` | quick rough render (see below) |
-| `--scale F` | resize each input frame first, e.g. `0.5`; keeps every frame |
-| `--start S`, `--duration S` | use only part of the input (in seconds) |
-| `--fps R` | output frame rate (defaults to the input's) |
-
-The whole clip is held in memory at once (width × height × frames × 3 bytes),
-so start with short clips. The script prints how much memory it's using, and
-at the end how long the video it made is against how long it took.
-
-### Preview
-
-`--preview` halves the clip in x, y **and** time (every other pixel, every
-other frame) before slicing. Because one frame counts as one pixel, shrinking
-all three keeps the cuboid's shape, so the preview shows the same slices as
-the full render at half size. It also copies the nearest voxel instead of
-blending, and encodes with x264's `ultrafast` preset. It plays at half the
-frame rate, so it runs as long as the full render would.
-
-Note that `--scale` only resizes the frames and keeps every frame, so it
-changes the cuboid's shape: the same angle gives a different slice at a
-different `--scale`.
-
-## In a browser
-
-`web/` holds a page that does what `timeslice.py` does in the browser: it
-decodes the clip, slices it on the GPU and encodes the result there. It is
-online at <https://timeywimey.babissimo.net/>: on every push to `main`,
-`.github/workflows/deploy-pages.yml` builds it and publishes it on GitHub
-Pages. It is built with npm, which comes with [Node.js](https://nodejs.org/). To work on
-it, run
-
-```sh
-npm install
-npm run dev
-```
-
-and open the address it prints. It serves the page straight from `web/` and
-reloads it as you edit.
-
-To host it, run `npm run build` and serve `web/dist/` as static files from
-any web server: on this machine, `npx vite preview`, or
-`python3 -m http.server -b 127.0.0.1 -d web/dist` and then open
-<http://localhost:8000/>. WebCodecs runs only in a secure context, so serve
-the page over HTTPS or open it at `localhost` or `127.0.0.1`; at any other
-plain `http://` address (such as the `http://[::]:8000/` that `http.server`
-prints without `-b`) the page says it can't decode video. Browsers won't run
-its scripts from a file opened straight from disk.
+## Using the page
 
 Open videos or drop them onto the page, or open a folder to list the videos
-at its top level (`.mp4`, `.mov`, `.m4v`, `.mkv`, `.webm`, `.avi` and
-`.gif`). The page reads a video where it is, a piece at a time as it needs
-it: nothing is uploaded or copied.
+at its top level (`.mp4`, `.mov`, `.m4v`, `.mkv` and `.webm`). The page reads
+a video where it is, a piece at a time as it needs it: nothing is uploaded or
+copied.
 
 - **Live preview** plays the slice while you change the angle and other
-  options. It shows the same frames as `--preview` would render: the browser
-  decodes a half-size copy of the clip, holds it on the GPU and slices each
-  frame there. Space plays and pauses; the arrow keys step a frame.
+  options. The browser decodes a half-size copy of the clip, holds it on the
+  GPU and slices each frame there. Space plays and pauses; the arrow keys
+  step a frame.
 - **Cuboid** draws the clip as a box (one unit per pixel or frame), with the
   first frame at the front and time running back, the current output frame
   drawn where it cuts through, and the region the sweep covers shaded on top.
@@ -104,13 +28,37 @@ it: nothing is uploaded or copied.
   below. With surface noise on it still draws the flat plane the points are
   pushed off, not the bumps. On a loop, each part of the frame past an end
   (or a side) of the box is drawn where it wraps round to.
-- **Render preview** and **Render full quality** render the slice in the
-  browser, as `timeslice.py` (with `--preview` for the first) would with the
-  options on the page, and encode it as H.264 in an MP4 named as the command
-  line's would be. A render runs on its own while you carry on with the page,
-  and can be cancelled. Renders are listed below the player, to watch,
-  download or remove, until you leave or reload the page, which asks first
-  while a render runs or one hasn't been downloaded.
+- **Render preview** and **Render full quality** render the slice with the
+  options on the page and encode it as H.264 in an MP4, named after the clip
+  and the options that differ from the defaults. A render runs on its own
+  while you carry on with the page, and can be cancelled. Renders are listed
+  below the player, to watch, download or remove, until you leave or reload
+  the page, which asks first while a render runs or one hasn't been
+  downloaded.
+
+| option | meaning |
+| --- | --- |
+| Rotate, Shear | how to read along the tilted plane (see [Rotate or shear](#rotate-or-shear)) |
+| Angle about y | tilt of the slicing plane, in degrees (default 45) |
+| At the video's edges | **Let black in** (default) sweeps the whole plane; **Stay inside** keeps each frame the clip's width and entirely inside the video; **Wrap round** makes a loop (see [Loops](#loops)) |
+| Crossfade the ends | with Wrap round: blend the clip's last so many seconds into its first to hide the join |
+| Wrap round the sides too | with Wrap round: the picture's left edge follows its right, so the frame can move sideways (see [Loops round the sides](#loops-round-the-sides)) |
+| Crossfade the sides | blend the picture's last so many columns into its first to hide the seam |
+| Motion | which way an inside or side-wrapping frame moves (see [Motion](#motion)) |
+| Surface noise | push each point of the surface off the plane with Perlin noise (see [Surface noise](#surface-noise)) |
+| Start, Duration | use only part of the clip, in seconds |
+| Scale | resize each frame first, e.g. `0.5`; keeps every frame |
+| Output fps | output frame rate, such as `24` or `30000/1001` (defaults to the clip's) |
+
+A preview, and the live view, halve the clip in x, y **and** time (every
+other pixel, every other frame) before slicing. Because one frame counts as
+one pixel, shrinking all three keeps the cuboid's shape, so a preview shows
+the same slices as the full render at half size. It also copies the nearest
+voxel instead of blending. It plays at half the frame rate, so it runs as
+long as the full render would.
+
+Scale only resizes the frames and keeps every frame, so it changes the
+cuboid's shape: the same angle gives a different slice at a different scale.
 
 The page needs a browser with WebGL2 and WebCodecs, such as a recent Chrome
 or Edge, that can decode the clip's video and encode H.264. Opening a folder
@@ -124,17 +72,14 @@ than 1 or 2 GB to one piece, and holds at most so many frames in one (2048 on
 many). The live view and previews hold the clip at half size and half the
 frame rate, a full-quality render at full size and every frame, so a full
 render of 30 fps 1080p video runs out of room at some 20 to 30 seconds of it.
-The page says when a clip needs more than the GPU can give. Set a duration or
-scale to use part of a long video, or render it with `timeslice.py` (see
-[Usage](#usage)), which holds the clip in the computer's memory rather than
-the GPU's. The page shows the command, as it does for a file the browser can't
-open, such as an AVI or a GIF, or whose video it can't decode.
+The page says when a clip needs more than the GPU can give: set a duration or
+scale to use part of a long video.
 
 ## How the angle works
 
 Picture the cuboid from above: x runs left to right and time runs up the
 page, like a space-time diagram. Ordinary playback slides a horizontal line
-(one moment) up the page. `--angle` tilts that line anticlockwise:
+(one moment) up the page. The angle tilts that line anticlockwise:
 
 ```
  t ↑     0°              30°              90°
@@ -158,193 +103,191 @@ One frame of time is treated as one pixel of distance.
 
 Both read along the same tilted line; they space the samples differently.
 
-- **rotate** spaces samples one pixel apart along the line itself, as if the
+- **Rotate** spaces samples one pixel apart along the line itself, as if the
   cuboid were rotated. The steeper the angle, the less of the scene's width a
   frame covers, and the more of it is made of time.
-- **shear** takes one sample per input column: output column x is input
+- **Shear** takes one sample per input column: output column x is input
   column x, delayed by tan(angle) frames per pixel across. The whole scene
   stays in view at every angle, but the delay becomes infinite at 90°, so
   shear needs an angle between -90° and 90°. Past 45° it skips frames between
   neighbouring columns, so fast motion can break up.
 
-### Whole plane or `--inside`
+### Let black in, or stay inside
 
-By default the whole plane is swept through the cuboid, from where it first
-touches a corner to where it leaves. Parts of the plane outside the video
-come out black, and rotated frames are wider than the input.
+With **Let black in**, the whole plane is swept through the cuboid, from
+where it first touches a corner to where it leaves. Parts of the plane
+outside the video come out black, and rotated frames are wider than the
+input.
 
-With `--inside`, each frame is exactly the input's width and stays entirely
-inside the video. A frame W pixels wide tilted at an angle covers about
-W × sin(angle) frames of time (W × tan(angle) for shear), so steep angles
-need long clips. If the clip is too short, the script stops, says which
-angles would fit, and suggests dropping `--inside`.
+With **Stay inside**, each frame is exactly the input's width and stays
+entirely inside the video. A frame W pixels wide tilted at an angle covers
+about W × sin(angle) frames of time (W × tan(angle) for shear), so steep
+angles need long clips. If the clip is too short, the page says which angles
+would fit.
 
-### Motion (`--inside` with rotate)
+### Motion
 
-An inside frame can move through the cuboid along different straight lines:
+An inside rotated frame can move through the cuboid along different
+straight lines:
 
-- **perpendicular** to itself, as the whole-plane sweep does. Every frame is a
-  fresh slice, but a full-width frame has little room to move sideways, so
-  this gives short videos at small angles.
-- **time**: straight forward through time, like ordinary playback but tilted.
-- **longest** (default): the longest straight line that fits. It usually
-  runs mostly through time, drifting sideways as far as there is room.
+- **Perpendicular to the frame**, as the whole-plane sweep does. Every frame
+  is a fresh slice, but a full-width frame has little room to move sideways,
+  so this gives short videos at small angles.
+- **Straight through time**, like ordinary playback but tilted.
+- **Longest line that fits** (default): it usually runs mostly through time,
+  drifting sideways as far as there is room.
 
 Shear frames always use every input column, so they can only move through
 time. The whole-plane sweep always moves perpendicular, because there the
 frame already holds the plane's whole cut through the video and another
-direction would only change the speed.
+direction would only change the speed. A loop round the sides moves straight
+through time (the default there) or perpendicular to the frame; no line on
+it is the longest (see [Loops round the sides](#loops-round-the-sides)).
 
-### Surface noise (`--noise`)
+### Surface noise
 
-`--noise A` makes the slicing surface bumpy instead of flat: Perlin noise
+Surface noise makes the slicing surface bumpy instead of flat: Perlin noise
 (Ken Perlin's "Improving Noise", SIGGRAPH 2002) pushes each pixel of the
-frame off the plane by up to A frames (one frame = one pixel). The noise is a
-smooth random function of the pixel's position in the frame and of how far
-the sweep has got, so the bumps change as the frame moves. It works with
-every slice, angle and motion.
+frame off the plane by up to the amplitude, in frames (one frame = one
+pixel). The noise is a smooth random function of the pixel's position in the
+frame and of how far the sweep has got, so the bumps change as the frame
+moves. It works with every slice, angle and motion.
 
-- `--noise-direction time` (default) reads each pixel up to A frames earlier
-  or later than the flat frame would. It only shows where something moves:
-  still parts of the scene look the same at every moment. On a rotated frame
-  near 90° the frame itself runs through time, so this slides points along
-  the frame rather than off it.
-- `--noise-direction perpendicular` moves each point straight off the plane
-  in x–t, which is a true bump at every angle. At 0° it's the same as `time`;
-  otherwise it moves points sideways in x too, so a sheared frame's column x
-  is no longer exactly input column x.
-- `--noise-size` is roughly how far apart the bumps are, and `--noise-speed`
-  how fast they change: the pattern moves that many pixels through a third
-  noise dimension per output frame. With 0 the surface keeps one shape as it
-  sweeps. `--noise-seed` picks a different pattern.
+- **Push through time** (default) reads each pixel up to the amplitude
+  earlier or later than the flat frame would. It only shows where something
+  moves: still parts of the scene look the same at every moment. On a rotated
+  frame near 90° the frame itself runs through time, so this slides points
+  along the frame rather than off it.
+- **Push perpendicular** moves each point straight off the plane in x–t,
+  which is a true bump at every angle. At 0° it's the same as pushing through
+  time; otherwise it moves points sideways in x too, so a sheared frame's
+  column x is no longer exactly input column x.
+- **Size** is roughly how far apart the bumps are, and **Speed** how fast
+  they change: the pattern moves that many pixels through a third noise
+  dimension per output frame. With 0 the surface keeps one shape as it
+  sweeps. **Seed** picks a different pattern.
 
-The noise never moves a point further than A, and the sweep allows for that.
-The whole-plane sweep starts earlier and ends later, by as far as the bumps
-can reach ahead of the plane, so their first and last contact with the video
-is included. With `--inside`, the frame keeps that far from the video's
-edges, so no bump comes out black. That makes inside videos shorter,
-and some combinations don't fit:
+The noise never moves a point further than the amplitude, and the sweep
+allows for that. The whole-plane sweep starts earlier and ends later, by as
+far as the bumps can reach ahead of the plane, so their first and last
+contact with the video is included. Inside, the frame keeps that far from
+the video's edges, so no bump comes out black. That makes inside videos
+shorter, and some combinations don't fit:
 
 - Perpendicular noise pushes the ends of a full-width rotated frame sideways.
   At small angles (but not exactly 0°) there's no room for that, so these
-  fit only once the frame has turned far enough. The error message says
-  which angles fit.
+  fit only once the frame has turned far enough. The page says which angles
+  fit.
 - A sheared frame always spans the video's whole width, so with
-  perpendicular noise and `--inside` it only fits at 0°.
+  perpendicular noise it stays inside only at 0°.
 
 To save time, the noise is worked out at points `size`/8 pixels apart and
 blended smoothly between them (Catmull-Rom). That comes within half a
 percent of the amplitude of the exact Perlin noise, and still never moves a
-point further than A. For bumps under 16 pixels apart, where those points
-would be under 2 pixels apart, it's worked out at every pixel instead.
+point further than the amplitude. For bumps under 16 pixels apart, where
+those points would be under 2 pixels apart, it's worked out at every pixel
+instead.
 
-Previews and the live view shrink A and the size with the clip, so they show
-the same bumps as the full render. (For bumps 16 to 32 pixels apart the full
-render uses those points but the half-size preview works the noise out at
-every pixel, so the two can differ by up to that half percent.)
+Previews and the live view shrink the amplitude and the size with the clip,
+so they show the same bumps as the full render. (For bumps 16 to 32 pixels
+apart the full render uses those points but the half-size preview works the
+noise out at every pixel, so the two can differ by up to that half percent.)
 
-Noise costs little time: on a 4-core machine, slicing a 1080p frame took
-about 22 ms against 17 flat, and full renders, which spend most of their
-time encoding, took no measurably longer. Preview frames took about 5 ms
-against 4.4.
+### Loops
 
-### Loops (`--loop`)
+**Wrap round** makes a video that plays on repeat without a jump. Time runs
+round in a ring, the clip's first frame following its last, and the frame
+moves straight through time once round it. So the video is as long as the
+clip, and its last frame leads back into its first. At 0° it is the clip
+itself.
 
-`--loop` makes a video that plays on repeat without a jump. Time runs round
-in a ring, the clip's first frame following its last, and the frame moves
-straight through time once round it. So the video is as long as the clip,
-and its last frame leads back into its first. At 0° it is the clip itself.
-
-Each frame is the input's width and stays inside the video, as with
-`--inside`, but since time wraps round, no clip is too short for an angle.
-Only perpendicular noise can take a frame out of the video, by pushing its
-ends sideways. As with `--inside`, a rotated frame has no room for that at
-small angles other than 0° (the error message says which angles fit), and a
-sheared one at any angle but 0°.
+Each frame is the input's width and stays inside the video, as with Stay
+inside, but since time wraps round, no clip is too short for an angle. Only
+perpendicular noise can take a frame out of the video, by pushing its ends
+sideways. As with Stay inside, a rotated frame has no room for that at small
+angles other than 0° (the page says which angles fit), and a sheared one at
+any angle but 0°.
 
 The join from the clip's last frame back to its first becomes part of the
 video. Unless the clip already loops, it shows as a tear in time that
-crosses each frame once per loop. `--loop-fade S` hides it by blending the
-clip's last S seconds into its first S, which makes the loop S seconds
-shorter. Frames in the fade mix two moments, so anything moving shows twice
-as the fade passes, in a band that crosses the frame (at 0°, a plain
+crosses each frame once per loop. **Crossfade the ends** hides it by blending
+the clip's last so many seconds into its first, which makes the loop that
+much shorter. Frames in the fade mix two moments, so anything moving shows
+twice as the fade passes, in a band that crosses the frame (at 0°, a plain
 crossfade). The fade can be at most half the clip.
 
 Surface noise loops too: after one loop the bumps are back in the shape they
 started in. For that, the noise has to move through a whole number of its
-cells (each `--noise-size` across) per loop, so `--noise-speed` is rounded
-to the nearest speed that does, and to at least two cells, since over one
-the bumps barely change. A preview's loop has half as many frames, so where
-the rounding is close it can land on one cell more or fewer than the full
-render's.
+cells (each Size across) per loop, so the speed is rounded to the nearest
+speed that does, and to at least two cells, since over one the bumps barely
+change. A preview's loop has half as many frames, so where the rounding is
+close it can land on one cell more or fewer than the full render's.
 
-### Loops round the sides (`--loop-sides`)
+### Loops round the sides
 
 A loop that only wraps time has to move straight through time, since a
 frame drifting sideways would leave the video and never come back. At steep
 angles that is the dull way to move: the frame lies nearly along time, so
 moving through time mostly slides it along itself.
 
-`--loop-sides` wraps x as well, the picture's left edge following its right,
-which makes the clip a torus. `--motion perpendicular` can then move the
-frame straight off itself, as the whole-plane sweep does, and keep going.
-The loop closes once the frame has gone across the width a whole number of
-times and round time a whole number of times, so its direction is nudged to
-the shortest such path within 2° of perpendicular (or the closest, if none
-within 16 times round either way is that close). Loops can be much longer
-than the clip: at 80°, a 6-second clip 320 pixels wide gives a 32-second
-loop, three times across the width and once round time.
+**Wrap round the sides too** wraps x as well, the picture's left edge
+following its right, which makes the clip a torus. Motion perpendicular to
+the frame can then move it straight off itself, as the whole-plane sweep
+does, and keep going. The loop closes once the frame has gone across the
+width a whole number of times and round time a whole number of times, so its
+direction is nudged to the shortest such path within 2° of perpendicular (or
+the closest, if none within 16 times round either way is that close). Loops
+can be much longer than the clip: at 80°, a 6-second clip 320 pixels wide
+gives a 32-second loop, three times across the width and once round time.
 
 With the sides wrapping round, noise can't push the frame out of the video
 either, so perpendicular noise fits at every angle.
 
 The picture's right edge now meets its left, so unless the footage wraps
 round (a 360° panorama, say), a seam shows wherever a frame crosses it.
-`--loop-side-fade PX` hides it the way `--loop-fade` hides the join in
-time, blending the picture's last PX columns into its first PX, which makes
-it PX narrower (after `--scale`). Like `--loop-fade`, it can be at most half.
+**Crossfade the sides** hides it the way Crossfade the ends hides the join in
+time, blending the picture's last so many columns into its first, which
+makes it that much narrower (after scaling). Like the ends' fade, it can be
+at most half.
 
-## Code layout
+## Working on it
 
-`timeslice.py` is split so that new kinds of slices only need new coordinates:
+The page is built with npm, which comes with [Node.js](https://nodejs.org/).
+Run
 
-- `sample(volume, t, y, x)` reads the video at any (t, y, x) positions, so it
-  works for any surface. Each point blends the 8 voxels around it, weighted
-  by closeness (linear interpolation); points outside the cuboid are black.
-  With `wrap`, time runs round in a ring instead, for loops, and with
-  `wrap_x` so does x.
-- `sample_columns(volume, t, x)` is a faster version for slices made of whole
-  source columns, which is what any tilt about the y axis gives. It only
-  blends across x and t (4 voxels), or copies the nearest one for previews.
-- `rotation_sweep(...)` and `shear_sweep(...)` plan a sweep: the output size,
-  `at(f)`, the (t, x) position of every column of output frame f, the
-  normal of the frame's plane, and whether it loops, and round the sides
-  too. Given noise, they make room for it.
-- `plan_sweep(...)` picks between them.
-- `Noise` is the surface noise: `field(...)` gives its values over a frame,
-  blended from points `NOISE_STEPS` to every `size` pixels, and
-  `push(normal)` which way and how far they move a point. Given a `period`,
-  it repeats every that many frames.
-- `surface(...)` gives the (t, y, x) position of every pixel of a noisy
-  frame, which `sample` can read.
-- `sample_noisy_columns(...)` is a faster way to read a noisy frame: it
-  works out the noise as it goes, and since each pixel stays in its row it
-  only blends across x and t, like `sample_columns`. It gives exactly what
-  `sample` gives at `surface`'s points.
-- `slice_frame(...)` makes an output frame, with `sample_columns` when the
-  surface is flat and `sample_noisy_columns` when it's bumpy.
-- `crossfade(volume, n)` blends a clip's last n frames into its first, in
-  place, for `--loop-fade`, or with `axis=2` its last n columns into its
-  first, for `--loop-side-fade`.
-- `main()` handles decoding and encoding (via ffmpeg).
+```sh
+npm install
+npm run dev
+```
 
-`web/app.js` runs the page, and the TypeScript in `web/src/` decodes, slices
-and encodes clips the way `timeslice.py` does.
+and open the address it prints. It serves the page straight from `web/` and
+reloads it as you edit.
 
-Run the geometry checks with `uv run pytest` (or `uv run test_timeslice.py`).
-`npm test` runs the page's checks, some of them in both Google Chrome, which has
+To host it, run `npm run build` and serve `web/dist/` as static files from
+any web server, such as `npx vite preview`. WebCodecs runs only in a secure
+context, so serve the page over HTTPS or open it at `localhost` or
+`127.0.0.1`; at any other plain `http://` address the page says it can't
+decode video. Browsers won't run its scripts from a file opened straight from
+disk. On every push to `main`, `.github/workflows/deploy-pages.yml` builds the
+page and publishes it on GitHub Pages.
+
+`web/app.js` runs the page. The TypeScript in `web/src/` does the work:
+
+- `decode.ts` reads a clip's frames, `encode.ts` writes a render's.
+- `planner.ts` plans a sweep: the output size and where each column of each
+  frame reads the cuboid. `noise.ts` is the surface noise, and `options.ts`
+  reads the page's options into a plan.
+- `gpu/` holds the clip on the GPU (`volume.ts`) and slices it there
+  (`slicer.ts`, `shaders.ts`).
+- `live.ts` runs the live preview; `render.ts` runs a render in a worker of
+  its own (`render.worker.ts`).
+- `sources.ts` lists the videos the page offers.
+
+`npm test` runs the checks, some of them in both Google Chrome, which has
 to be installed, and Playwright's Firefox, which `npx playwright install firefox`
-installs. `npm run typecheck` checks the TypeScript. The page's checks
-compare it with `timeslice.py`, through reference values the scripts in
-`web/test/fixtures/` make from it; run one with
-`uv run python web/test/fixtures/<name>.py` to make its values afresh.
+installs; `npm run test:unit` runs only those that need no browser, as CI
+does. `npm run typecheck` checks the TypeScript. The expected values in
+`web/test/fixtures/` (the JSON files and `decode/frames.bin.gz`) were
+recorded from an earlier reference implementation, and nothing can make them
+afresh: when a change breaks a test that reads one, replace it with a test of
+the behaviour itself.

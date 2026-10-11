@@ -1,4 +1,4 @@
-/** A frame rate as a fraction, like Python's Fraction (e.g. 30000/1001). */
+/** A frame rate as a fraction (e.g. 30000/1001). */
 export interface Rate { num: number; den: number }
 
 /** Where each column of one output frame reads the volume: time t[j] and position x[j]. */
