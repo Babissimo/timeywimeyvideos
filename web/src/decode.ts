@@ -10,7 +10,7 @@ import {
 import { avcFrameRate } from "./avc";
 import { isText, readMatroska, readMp4, type Mp4Track } from "./container";
 import { hevcFrameRate } from "./hevc";
-import { gcd, limitDenominator, roundHalfEven } from "./pymath";
+import { gcd, limitDenominator, roundHalfEven } from "./numbers";
 import type { Rate } from "./types";
 
 /** The browser couldn't read or decode a video. */

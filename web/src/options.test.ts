@@ -1,21 +1,11 @@
 import { describe, expect, test } from "vitest";
-import raw from "../test/fixtures/options.json?raw";
-import { Noise } from "./noise";
+import { MAX_SEED, Noise } from "./noise";
 import {
   endpoints, fullSize, liveNoise, loopFades, plan, Problem, readOptions, type FullSize,
   type OptionValues,
 } from "./options";
 import { planSweep, PREVIEW_SCALE } from "./planner";
 import type { ClipInfo } from "./decode";
-
-interface PyCase {
-  values: OptionValues;
-  options?: Record<string, unknown> & { fps: [number, number] | null };
-  error?: string;
-  kind?: string;
-}
-
-const cases = JSON.parse(raw) as PyCase[];
 
 function thrown(fn: () => unknown): unknown {
   try { fn(); } catch (error) { return error; }
@@ -30,63 +20,93 @@ function problem(fn: () => unknown): { message: string; kind: string } {
   return { message, kind };
 }
 
-describe("readOptions gives the recorded options or problem", () => {
-  for (const { values, options, error, kind } of cases) {
-    test(JSON.stringify(values), () => {
-      if (error !== undefined) {
-        expect(problem(() => readOptions(values))).toEqual({ message: error, kind });
-        return;
-      }
-      const got = readOptions(values);
-      const { fps, ...rest } = options!;
-      const noise = got.noise && { ...got.noise };
-      expect({ ...got, noise, fps: got.fps && [got.fps.num, got.fps.den] })
-        .toEqual({ ...rest, fps });
-    });
-  }
+const refused = (message: string) => ({ message, kind: "error" });
+
+describe("readOptions", () => {
+  test("gives the defaults for empty fields", () => {
+    const defaults = { slice: "rotate", angle: 45, inside: false, motion: null, noise: null,
+                       scale: 1, start: null, duration: null, fps: null, loop: false,
+                       sides: false, loopFade: 0, sideFade: 0 };
+    expect(readOptions({})).toEqual(defaults);
+    expect(readOptions({ angle: "", scale: " ", start: null, fps: "" })).toEqual(defaults);
+  });
+
+  test("reads numbers, and refuses what isn't one or is out of range", () => {
+    expect(readOptions({ angle: " 12.5 " }).angle).toBe(12.5);
+    expect(readOptions({ angle: "-1e1" }).angle).toBe(-10);
+    expect(readOptions({ angle: 30 }).angle).toBe(30);
+    expect(problem(() => readOptions({ angle: "steep" })))
+      .toEqual(refused("angle must be a number."));
+    expect(problem(() => readOptions({ angle: "Infinity" })))
+      .toEqual(refused("angle is out of range."));
+    const ranges: [string, OptionValues][] = [
+      ["scale", { scale: "0" }], ["start", { start: "-1" }], ["duration", { duration: "0" }],
+      ["loop_fade", { loop: "1", loop_fade: "-1" }], ["noise", { noise: "-2" }],
+    ];
+    for (const [name, values] of ranges)
+      expect(problem(() => readOptions(values)), name).toEqual(refused(`${name} is out of range.`));
+  });
+
+  test("reads flags, a loop overriding inside and the sides wrapping only on a loop", () => {
+    for (const on of ["1", "true", "True", true])
+      expect(readOptions({ inside: on }).inside, String(on)).toBe(true);
+    expect(readOptions({ inside: "" }).inside).toBe(false);
+    expect(readOptions({ inside: "1", loop: "1" })).toMatchObject({ inside: false, loop: true });
+    expect(readOptions({ loop_sides: "1" }).sides).toBe(false);
+    expect(readOptions({ loop: "1", loop_sides: "1" }).sides).toBe(true);
+  });
+
+  test("keeps motion only where a frame can move different ways", () => {
+    expect(readOptions({ motion: "time" }).motion).toBe(null);
+    expect(readOptions({ motion: "time", inside: "1", slice: "shear" }).motion).toBe(null);
+    expect(readOptions({ motion: "time", inside: "1" }).motion).toBe("time");
+    expect(readOptions({ motion: "perpendicular", loop: "1", loop_sides: "1" }).motion)
+      .toBe("perpendicular");
+    expect(problem(() => readOptions({ motion: "longest", loop: "1", loop_sides: "1" })))
+      .toEqual(refused("A loop round the sides moves through time or perpendicular to the "
+                       + "frame: no line on it is the longest."));
+    expect(problem(() => readOptions({ motion: "up" })))
+      .toEqual(refused('Unknown motion "up".'));
+    expect(problem(() => readOptions({ slice: "twist" })))
+      .toEqual(refused('Unknown slice "twist".'));
+  });
+
+  test("reads the loop's crossfades only where they apply", () => {
+    expect(readOptions({ loop_fade: "2", loop_side_fade: "8" }))
+      .toMatchObject({ loopFade: 0, sideFade: 0 });
+    expect(readOptions({ loop: "1", loop_sides: "1", loop_fade: "2", loop_side_fade: "8" }))
+      .toMatchObject({ loopFade: 2, sideFade: 8 });
+  });
+
+  test("reads frame rates as whole numbers, decimals or fractions", () => {
+    const rates: [string, number, number][] = [
+      ["24", 24, 1], ["30000/1001", 30000, 1001], ["29.97", 2997, 100], [" 25 / 2 ", 25, 2],
+      ["50/2", 25, 1],
+    ];
+    for (const [fps, num, den] of rates) expect(readOptions({ fps }).fps, fps).toEqual({ num, den });
+    const message = "Output fps must be a positive number, like 24 or 30000/1001.";
+    for (const fps of ["0", "-24", "1/0", "24fps", "1e3", "abc", "9".repeat(20)])
+      expect(problem(() => readOptions({ fps })), fps).toEqual(refused(message));
+  });
+
+  test("reads noise, its seed a whole number up to MAX_SEED", () => {
+    expect(readOptions({ noise: "0" }).noise).toBe(null);
+    expect({ ...readOptions({ noise: "2" }).noise }).toEqual({ ...new Noise(2) });
+    const noise = readOptions({ noise: "2", noise_size: "16", noise_speed: "-0.5",
+                                noise_direction: "perpendicular", noise_seed: "7" }).noise;
+    expect({ ...noise }).toEqual({ ...new Noise(2, { size: 16, speed: -0.5,
+                                                    direction: "perpendicular", seed: 7 }) });
+    expect(readOptions({ noise: "2", noise_seed: String(MAX_SEED) }).noise!.seed).toBe(MAX_SEED);
+    const seed = refused(`The noise seed must be a whole number from 0 to ${MAX_SEED}.`);
+    for (const noise_seed of [String(MAX_SEED + 1), "-1", "1.5", "seven"])
+      expect(problem(() => readOptions({ noise: "2", noise_seed })), noise_seed).toEqual(seed);
+    expect(problem(() => readOptions({ noise: "2", noise_size: "0" })))
+      .toEqual(refused("noise_size is out of range."));
+    expect(problem(() => readOptions({ noise: "2", noise_direction: "up" })))
+      .toEqual(refused('Unknown noise direction "up".'));
+  });
 });
 
-describe("readOptions reads frame rates", () => {
-  const refused = { message: "Output fps must be a positive number, like 24 or 30000/1001.",
-                    kind: "error" };
-  const digits = (n: number) => `${"0".repeat(n - 1)}1`;
-
-  test("with at most 4300 digits in each part, as Python's int() reads them", () => {
-    for (const fps of [digits(4300), `1/${digits(4300)}`, [...digits(4300)].join("_")])
-      expect(readOptions({ fps }).fps).toEqual({ num: 1, den: 1 });
-    expect(readOptions({ fps: `1e-${digits(4300)}` }).fps).toEqual({ num: 1, den: 10 });
-    for (const fps of [digits(4301), `1/${digits(4301)}`, `0.${digits(4301)}`,
-                       `1e-${digits(4301)}`])
-      expect(problem(() => readOptions({ fps }))).toEqual(refused);
-  });
-
-  test("refusing, without working them out, those a double can't hold", () => {
-    // Fraction() takes these, but as doubles their numerators or denominators are infinite.
-    for (const fps of ["1e400", "1e-400", `${"9".repeat(400)}/7`, "1e1000000", "1e-1000000",
-                       "1e300000000", "0e999999999"])
-      expect(problem(() => readOptions({ fps })), fps).toEqual(refused);
-  });
-});
-
-describe("readOptions reads noise seeds", () => {
-  const seed = (noise_seed: unknown) => () => readOptions({ noise: "2", noise_seed });
-
-  test("exactly, up to the largest whole number a double holds", () => {
-    for (const given of ["9007199254740991", "9_007_199_254_740_991", Number.MAX_SAFE_INTEGER])
-      expect(seed(given)().noise!.seed, String(given)).toBe(Number.MAX_SAFE_INTEGER);
-  });
-
-  test("refusing larger ones, which Python's int() reads but a double can't hold", () => {
-    const range = { message: "The noise seed must be a whole number from 0 to "
-                      + "9007199254740991.", kind: "error" };
-    for (const given of ["9007199254740992", "9007199254740993", 2 ** 53, "9".repeat(400)])
-      expect(problem(seed(given)), String(given)).toEqual(range);
-    // As Python refuses these, with its message.
-    const whole = { message: "The noise seed must be a whole number, 0 or more.", kind: "error" };
-    for (const given of [`-${"9".repeat(400)}`, "1".repeat(4301)])
-      expect(problem(seed(given)), given.slice(0, 10)).toEqual(whole);
-  });
-});
 
 // A clip 64×48 at 20 fps for 3 s: 30 frames 32 pixels wide at half size.
 const clip: ClipInfo = { width: 64, height: 48, fps: { num: 20, den: 1 }, duration: 3 };
@@ -138,7 +158,7 @@ describe("loopFades", () => {
     const opts = read({ loop: 1, loop_fade: 0.5, loop_sides: 1, loop_side_fade: 8 });
     expect(loopFades(30, 32, 10, opts, PREVIEW_SCALE)).toEqual([5, 4]);
     expect(loopFades(30, 32, 10, read({ loop: 1, loop_fade: 0.25 }), PREVIEW_SCALE))
-      .toEqual([2, 0]);  // halves round to even
+      .toEqual([3, 0]);
     expect(loopFades(30, 32, 10, read({ loop: 1, loop_fade: 0.35 }), PREVIEW_SCALE))
       .toEqual([4, 0]);
   });

@@ -70,7 +70,7 @@ const close = (got: number[], expected: number[]) =>
   got.forEach((v, i) => expect(Math.abs(v - expected[i]))
     .toBeLessThanOrEqual(1e-9 * Math.max(1, Math.abs(expected[i]))));
 
-describe("shows the frames timeslice --preview makes", () => {
+describe("shows the recorded frames", () => {
   const shared = view();
   afterAll(() => {
     shared.live.dispose();
@@ -110,6 +110,29 @@ describe("shows the frames timeslice --preview makes", () => {
       expect(share).toBeGreaterThanOrEqual(0.97);
     });
   }
+});
+
+/** The mean difference between two RGBA frames' colour levels. */
+function meanDifference(a: Uint8Array, b: Uint8Array): number {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) if (i % 4 !== 3) sum += Math.abs(a[i] - b[i]);
+  return sum / (a.length * 3 / 4);
+}
+
+describe("surface noise", () => {
+  test("bends the slice, the same way for the same seed", async () => {
+    const { live, canvas } = make();
+    const frame = async (values: Record<string, string>) => {
+      await live.show(SOURCE, { angle: "30", ...values }, 0.5);
+      return drawn(canvas);
+    };
+    const flat = await frame({});
+    const bumpy = await frame({ noise: "3", noise_seed: "4" });
+    expect(meanDifference(bumpy, flat)).toBeGreaterThan(1);
+    expect(await frame({ noise: "3", noise_seed: "4" })).toEqual(bumpy);
+    expect(meanDifference(await frame({ noise: "3", noise_seed: "5" }), bumpy)).toBeGreaterThan(1);
+    expect(await frame({ noise: "0" })).toEqual(flat);
+  });
 });
 
 describe("Live", () => {

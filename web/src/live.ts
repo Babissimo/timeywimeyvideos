@@ -10,7 +10,7 @@ import {
   endpoints, liveNoise, loopFades, plan, Problem, readOptions, type OptionValues, type Options,
 } from "./options";
 import { PREVIEW_SCALE, type Sweep, type TX } from "./planner";
-import { limitDenominator, roundHalfEven } from "./pymath";
+import { limitDenominator } from "./numbers";
 import { changed, hasChanged } from "./sources";
 import type { Columns, Rate } from "./types";
 
@@ -110,7 +110,7 @@ export class Live {
       this.sweeping = this.sweepFor(opts, clip);
     const { sweep, noise, info } = this.sweeping;
     const { volume } = clip;
-    const f = roundHalfEven((Math.min(Math.max(pos, 0), 1) || 0) * (sweep.frames - 1));
+    const f = Math.round((Math.min(Math.max(pos, 0), 1) || 0) * (sweep.frames - 1));
     const columns = sweep.at(f);
     const options = { nearest: true, wrap: sweep.loop, wrapX: sweep.sides };
     if (noise) {

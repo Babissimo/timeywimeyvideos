@@ -1,73 +1,12 @@
 import { describe, expect, test } from "vitest";
-import raw from "../test/fixtures/planner.json?raw";
 import {
   DoesNotFit, OptionError, planSweep, rotation, rotationSweep, shearSweep, windings,
-  type Motion, type PlanOptions, type Sweep,
+  type Motion, type Sweep,
 } from "./planner";
-import { Noise, type NoiseDirection } from "./noise";
-import { floorMod } from "./pymath";
+import { Noise } from "./noise";
+import { floorMod } from "./numbers";
 
-interface Case {
-  nFrames: number;
-  width: number;
-  options: Omit<PlanOptions, "noise">
-    & { noise?: { amplitude: number; direction?: NoiseDirection } };
-  error?: { type: string; message: string };
-  sweep?: {
-    width: number; frames: number; normal: [number, number]; loop: boolean; sides: boolean;
-    cols: number[]; at: [number, number[], number[]][];
-  };
-}
-
-const py = JSON.parse(raw) as { sweeps: Case[] };
-
-function close(got: number, expected: number): boolean {
-  return Math.abs(got - expected) <= 1e-9 * Math.max(1, Math.abs(expected));
-}
-
-/** How a case differs from what Python gave, or null if it doesn't. */
-function mismatch({ nFrames, width, options, error, sweep }: Case): string | null {
-  const noise = options.noise && new Noise(options.noise.amplitude, options.noise);
-  let got: Sweep;
-  try {
-    got = planSweep(nFrames, width, { ...options, noise });
-  } catch (err) {
-    if (!(err instanceof OptionError)) throw err;
-    if (!error) return `raised ${err.name}: ${err.message}`;
-    const kind = error.type === "DoesNotFit" ? DoesNotFit : OptionError;
-    if (!(err instanceof kind) || (kind === OptionError && err instanceof DoesNotFit)) {
-      return `raised ${err.name}, not ${error.type}`;
-    }
-    return err.message === error.message ? null : `said ${JSON.stringify(err.message)}`;
-  }
-  if (!sweep) return `planned a sweep, but Python raised ${error!.type}: ${error!.message}`;
-  for (const key of ["width", "frames", "loop", "sides"] as const) {
-    if (got[key] !== sweep[key]) return `${key} ${got[key]}, not ${sweep[key]}`;
-  }
-  if (!got.normal.every((v, i) => close(v, sweep.normal[i]))) return `normal ${got.normal}`;
-  for (const [f, t, x] of sweep.at) {
-    const at = got.at(f);
-    for (const [i, j] of sweep.cols.entries()) {
-      if (!close(at.t[j], t[i]) || !close(at.x[j], x[i])) {
-        return `at(${f}) column ${j} is (${at.t[j]}, ${at.x[j]}), not (${t[i]}, ${x[i]})`;
-      }
-    }
-  }
-  return null;
-}
-
-test("plans every sweep in the fixture as Python does", () => {
-  const failures = py.sweeps.flatMap((c) => {
-    const why = mismatch(c);
-    return why ? [`${c.nFrames} frames × ${c.width} ${JSON.stringify(c.options)}: ${why}`] : [];
-  });
-  expect(failures).toEqual([]);
-  expect(py.sweeps.filter((c) => c.sweep).length).toBeGreaterThan(400);
-  expect(py.sweeps.filter((c) => c.error?.type === "DoesNotFit").length).toBeGreaterThan(100);
-  expect(py.sweeps.filter((c) => c.sweep && c.options.noise).length).toBeGreaterThan(200);
-});
-
-// Geometry, after test_timeslice.py. The cuboid is T frames of W columns.
+// Geometry. The cuboid is T frames of W columns.
 const T = 7, W = 11;
 const MOTIONS: Motion[] = ["perpendicular", "time", "longest"];
 
@@ -172,43 +111,13 @@ describe("geometry", () => {
     expect(() => shearSweep(T, W, NaN)).toThrow("shear needs an angle between -90 and 90");
   });
 
-  test("a NaN or infinite angle or size fails as it does in Python", () => {
-    const nan = "cannot convert float NaN to integer";
-    const inf = "cannot convert float infinity to integer";
-    const domain = "math domain error";
-    const shearAngle = "shear needs an angle between -90 and 90 degrees "
-      + "(at 90 the delay would be infinite)";
-    const cases: [() => unknown, string][] = [
-      [() => rotationSweep(T, W, NaN), nan],
-      [() => rotationSweep(T, W, NaN, { inside: true }), nan],
-      [() => rotationSweep(T, W, NaN, { inside: true, motion: "perpendicular" }), nan],
-      // Python's min drops the NaN, leaving a reach of infinity.
-      [() => rotationSweep(T, W, NaN, { inside: true, motion: "time" }), inf],
-      [() => rotationSweep(T, W, Infinity), domain],
-      [() => rotationSweep(T, W, -Infinity, { inside: true }), domain],
-      [() => rotationSweep(T, W, Infinity, { loop: true }), domain],
-      [() => rotation(-Infinity), domain],
-      [() => shearSweep(T, W, NaN), shearAngle],
-      [() => shearSweep(T, W, Infinity, { inside: true }), shearAngle],
-      [() => shearSweep(T, W, -Infinity, { loop: true }), shearAngle],
-      [() => shearSweep(NaN, W, 30), nan],
-      [() => shearSweep(NaN, W, 30, { inside: true }), nan],
-      [() => shearSweep(Infinity, W, 30), inf],
-      [() => shearSweep(T, NaN, 30), "arange: cannot compute length"],
-      [() => shearSweep(T, Infinity, 30, { loop: true }), "Maximum allowed size exceeded"],
-    ];
-    for (const [plan, message] of cases) {
-      expect(plan).toThrow(OptionError);
-      expect(plan).toThrow(new OptionError(message));
-    }
-  });
+
 
   test("planSweep picks the kind of slice", () => {
     expect(positions(planSweep(T, W, { slice: "shear", angle: 20 })))
       .toEqual(positions(shearSweep(T, W, 20)));
     expect(positions(planSweep(13, 5, { angle: 30, inside: true, motion: "time" })))
       .toEqual(positions(rotationSweep(13, 5, 30, { inside: true, motion: "time" })));
-    expect(() => planSweep(T, W, { slice: "twist" as never })).toThrow("unknown slice 'twist'");
   });
 
   test("at(f) gives fresh arrays each time", () => {

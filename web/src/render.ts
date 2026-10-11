@@ -4,7 +4,6 @@
  */
 import { Noise } from "./noise";
 import { Problem, readOptions, type OptionValues, type Options } from "./options";
-import { formatG } from "./pymath";
 import type { Made, RenderMessage, RenderRequest, Stage } from "./render.worker";
 
 export type { Stage } from "./render.worker";
@@ -35,8 +34,7 @@ export async function render(file: File, values: OptionValues,
                              { preview = false, signal, progress, worker = startWorker }:
                                RenderOptions = {}): Promise<Rendered> {
   const opts = readOptions(values);
-  const fps = opts.fps && String(values.fps);
-  const name = outputName(file.name, opts, fps, preview);
+  const name = outputName(file.name, opts, preview);
   signal?.throwIfAborted();
   const thread = worker();
   try {
@@ -64,7 +62,6 @@ export async function render(file: File, values: OptionValues,
   }
 }
 
-const g = (x: number) => formatG(x);
 
 /** A file name less its extension. */
 function stem(name: string): string {
@@ -74,34 +71,33 @@ function stem(name: string): string {
 
 /**
  * The file name of a render of the file `name`: its stem, the slice and angle, then each option
- * that differs from the page's defaults. `fps` is the output frame rate as the page gave it, or
- * null.
+ * that differs from the page's defaults.
  */
-export function outputName(name: string, opts: Options, fps: string | null,
-                           preview: boolean): string {
-  const parts = [stem(name), opts.slice, `${g(opts.angle)}deg`];
+export function outputName(name: string, opts: Options, preview: boolean): string {
+  const parts = [stem(name), opts.slice, `${opts.angle}deg`];
   if (opts.inside) parts.push("inside");
   if (opts.motion) parts.push(opts.motion);
   if (opts.loop) {
     parts.push("loop");
-    if (opts.loopFade) parts.push(`loopfade${g(opts.loopFade)}s`);
+    if (opts.loopFade) parts.push(`loopfade${opts.loopFade}s`);
   }
   if (opts.sides) {
     parts.push("sides");
-    if (opts.sideFade) parts.push(`sidefade${g(opts.sideFade)}px`);
+    if (opts.sideFade) parts.push(`sidefade${opts.sideFade}px`);
   }
   const { noise } = opts, plain = new Noise(0);
   if (noise) {
-    parts.push(`noise${g(noise.amplitude)}`);
-    if (noise.size !== plain.size) parts.push(`noisesize${g(noise.size)}`);
-    if (noise.speed !== plain.speed) parts.push(`noisespeed${g(noise.speed)}`);
+    parts.push(`noise${noise.amplitude}`);
+    if (noise.size !== plain.size) parts.push(`noisesize${noise.size}`);
+    if (noise.speed !== plain.speed) parts.push(`noisespeed${noise.speed}`);
     if (noise.direction !== plain.direction) parts.push(`noise${noise.direction}`);
     if (noise.seed !== plain.seed) parts.push(`noiseseed${noise.seed}`);
   }
-  if (opts.start !== null) parts.push(`from${g(opts.start)}s`);
-  if (opts.duration !== null) parts.push(`for${g(opts.duration)}s`);
-  if (opts.scale !== 1) parts.push(`scale${g(opts.scale)}`);
-  if (fps) parts.push(`${fps.replaceAll("/", "over")}fps`);
+  if (opts.start !== null) parts.push(`from${opts.start}s`);
+  if (opts.duration !== null) parts.push(`for${opts.duration}s`);
+  if (opts.scale !== 1) parts.push(`scale${opts.scale}`);
+  const { fps } = opts;
+  if (fps) parts.push(fps.den === 1 ? `${fps.num}fps` : `${fps.num}over${fps.den}fps`);
   if (preview) parts.push("preview");
   return `${parts.join("_")}.mp4`;
 }

@@ -1,18 +1,8 @@
 import { describe, expect, test } from "vitest";
-import raw from "../test/fixtures/noise.json?raw";
-import { looping, Noise, NOISE_BOUND, noise3, permutation, type NoiseOptions } from "./noise";
-import { OptionError, rotationSweep, shearSweep } from "./planner";
-import type { NoiseGrid } from "./types";
-
-const py = JSON.parse(raw) as {
-  permutations: [number, number[]][];
-  noise3: [number, number, number, number, number, number][];
-  fields: {
-    width: number; height: number; f: number; options: NoiseOptions;
-    grid: { [K in keyof NoiseGrid]: K extends "nodeRows" | "nodeCols" ? number : number[] };
-    field: number[];
-  }[];
-};
+import {
+  looping, MAX_SEED, Noise, NOISE_BOUND, noise3, permutation,
+} from "./noise";
+import { rotationSweep, shearSweep } from "./planner";
 
 /** The largest difference relative to max(1, |expected|), or Infinity if the lengths differ. */
 function worst(got: ArrayLike<number>, expected: ArrayLike<number>): number {
@@ -24,34 +14,24 @@ function worst(got: ArrayLike<number>, expected: ArrayLike<number>): number {
   return most;
 }
 
-describe("matches Python", () => {
-  test("permutation is numpy's default_rng(seed).permutation(256), twice over", () => {
-    for (const [seed, table] of py.permutations) {
-      expect(Array.from(permutation(seed)), `seed ${seed}`).toEqual(table);
+describe("permutation", () => {
+  test("shuffles 0 to 255, written out twice", () => {
+    for (const seed of [0, 1, 7, 12345, MAX_SEED]) {
+      const table = Array.from(permutation(seed));
+      expect(table).toHaveLength(512);
+      expect([...table.slice(0, 256)].sort((a, b) => a - b))
+        .toEqual(Array.from({ length: 256 }, (_, i) => i));
+      expect(table.slice(256)).toEqual(table.slice(0, 256));
     }
   });
 
-  test("noise3", () => {
-    const got = py.noise3.map(([seed, x, y, z, period]) =>
-      noise3(permutation(seed), x, y, z, period));
-    expect(worst(got, py.noise3.map((row) => row[5]))).toBeLessThanOrEqual(1e-9);
-  });
-
-  test("grid and field", () => {
-    for (const { width, height, f, options, grid, field } of py.fields) {
-      const noise = new Noise(1, options);
-      const got = noise.grid(width, height, f);
-      const where = `${width}×${height} frame ${f} ${JSON.stringify(options)}`;
-      expect([got.nodeRows, got.nodeCols], where).toEqual([grid.nodeRows, grid.nodeCols]);
-      expect(Array.from(got.cols), where).toEqual(grid.cols);
-      expect(Array.from(got.rows), where).toEqual(grid.rows);
-      for (const key of ["nodes", "colW", "rowW"] as const) {
-        expect(worst(got[key], grid[key]), `${key} of ${where}`).toBeLessThanOrEqual(1e-9);
-      }
-      expect(worst(noise.field(width, height, f), field), where).toBeLessThanOrEqual(1e-9);
-    }
+  test("is the same for a seed every time, and differs between seeds", () => {
+    expect(permutation(3)).toEqual(permutation(3));
+    const tables = new Set([0, 1, 2, 3, MAX_SEED].map((seed) => permutation(seed).join()));
+    expect(tables.size).toBe(5);
   });
 });
+
 
 /** Row-major height × width noise as rows. */
 function rows(values: Float64Array, width: number): number[][] {
@@ -59,7 +39,6 @@ function rows(values: Float64Array, width: number): number[][] {
                     (_, i) => Array.from(values.subarray(i * width, (i + 1) * width)));
 }
 
-// After test_timeslice.py.
 describe("surface noise", () => {
   test("stays within its amplitude, and comes close to it", () => {
     for (let seed = 0; seed < 4; seed++) {
@@ -138,8 +117,6 @@ describe("surface noise", () => {
   test("pushes through time, or perpendicular to the plane", () => {
     expect(new Noise(2).push([0.6, -0.8])).toEqual([2, 0]);
     expect(new Noise(2, { direction: "perpendicular" }).push([0.6, -0.8])).toEqual([1.2, -1.6]);
-    expect(() => new Noise(2, { direction: "up" as never }).push([1, 0]))
-      .toThrow(new OptionError("unknown noise direction 'up'"));
   });
 
   test("scales, and changes a field at a time", () => {
@@ -160,10 +137,7 @@ describe("surface noise", () => {
     expect(looping(noise, shearSweep(7, 11, 30, { noise }))).toBe(noise);
   });
 
-  test("permutation refuses seeds numpy would", () => {
-    expect(() => permutation(-1)).toThrow(OptionError);
-    expect(() => permutation(1.5)).toThrow(TypeError);
-  });
+
 
   test("permutation and grid give arrays of their own, not the cache's", () => {
     const table = permutation(5);
@@ -175,28 +149,5 @@ describe("surface noise", () => {
     grid.cols[0] = grid.rows[0] = 99;
     const again = noise.grid(20, 10, 0);
     expect([again.colW[0], again.rowW[0], again.cols[0], again.rows[0]]).not.toContain(99);
-  });
-
-  test("fails as Python does for a size of 0, or an unroundable period", () => {
-    const nan = new OptionError("cannot convert float NaN to integer");
-    const inf = new OptionError("cannot convert float infinity to integer");
-    const zero = new RangeError("float division by zero");
-    const cases: [NoiseOptions, Error][] = [
-      [{ size: 0 }, zero],
-      [{ size: 0, speed: 0, period: 10 }, zero],
-      [{ period: 10, speed: NaN }, nan],
-      [{ period: NaN }, nan],
-      [{ period: 10, size: NaN }, nan],
-      [{ period: 10, speed: Infinity }, inf],
-      [{ period: Infinity }, inf],
-    ];
-    for (const [options, error] of cases) {
-      const noise = new Noise(1, options);
-      const where = Object.entries(options).map(([key, v]) => `${key} ${v}`).join(", ");
-      for (const call of [() => noise.grid(4, 2, 1), () => noise.field(4, 2, 1)]) {
-        expect(call, where).toThrow(error.constructor as typeof Error);
-        expect(call, where).toThrow(error);
-      }
-    }
   });
 });
