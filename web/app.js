@@ -4,6 +4,7 @@
 
 import { probe } from "./src/decode.ts";
 import { Live } from "./src/live.ts";
+import { fullSize, Problem, readOptions } from "./src/options.ts";
 import { handOver, render as renderClip } from "./src/render.ts";
 import { changed, hasChanged, same, Sources, VIDEO_TYPES } from "./src/sources.ts";
 
@@ -22,6 +23,7 @@ const state = {
   source: null,    // the File chosen
   id: "",          // and its id in the list
   chosen: 0,       // how many times a source has been chosen
+  clip: null,      // what the chosen file holds, once probed
   info: null,      // the live view's description of the frame on screen
   pos: 0.5,        // how far through the output video, 0 to 1
   playing: false,
@@ -136,6 +138,7 @@ function liveView() {
 function refresh() {
   again = true;
   pump();
+  estimate();
 }
 
 async function pump() {
@@ -205,8 +208,22 @@ function describe() {
     `${info.width}×${info.height} · ${info.frames} frames · ${seconds(info.seconds)}`;
   $("frame-label").textContent = `${info.frame + 1} / ${info.frames}`;
   if (!state.scrubbing) $("scrub").value = Math.round(state.pos * 1000);
+}
 
-  const full = info.full;
+// What a full-quality render would make. It needs only the clip and the options, not the
+// live view's half-size copy, so it still holds when that copy can't be loaded.
+let estimated = { clip: null, values: "" };  // what the estimate shown was worked out for
+
+function estimate() {
+  const values = options(), key = JSON.stringify(values);
+  if (state.clip === estimated.clip && key === estimated.values) return;
+  estimated = { clip: state.clip, values: key };
+  let full = null;
+  try {
+    if (state.clip && !UNABLE) full = fullSize(state.clip, readOptions(values));
+  } catch (err) {
+    if (!(err instanceof Problem)) throw err;  // else the live view says what's wrong
+  }
   $("estimate").classList.toggle("error", Boolean(full && full.error));
   $("estimate").textContent = !full ? "" : full.error ? `At full size: ${full.error}` :
     `Full quality makes ${full.width}×${full.height}, ${full.frames} frames ` +
@@ -431,6 +448,7 @@ async function chooseSource(id) {
   state.source = file;
   state.id = file ? id : "";
   state.chosen++;
+  state.clip = null;
   state.info = null;
   state.pos = 0.5;
   face = null;
@@ -439,7 +457,7 @@ async function chooseSource(id) {
   $("source-info").textContent = "";
   $("live-info").textContent = "";
   $("frame-label").textContent = "";
-  $("estimate").textContent = "";
+  estimate();
   if (!file) {
     showMessage(UNABLE || NO_SOURCE);
     return;
@@ -449,6 +467,8 @@ async function chooseSource(id) {
   try {
     const info = await probe(file);
     if (state.chosen !== chosen) return;
+    state.clip = info;
+    estimate();
     $("source-info").replaceChildren(
       `${info.width}×${info.height} · ${Number((info.fps.num / info.fps.den).toFixed(3))} fps` +
       (info.duration ? ` · ${seconds(info.duration)}` : "") + ` · ${bytes(file.size)} · `,

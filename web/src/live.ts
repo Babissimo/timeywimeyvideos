@@ -2,14 +2,12 @@
  * The live preview: a copy of the clip at half size in x, y and time, held on the GPU in YUV
  * 4:2:0 and sliced there a frame at a time, as `timeslice.py --preview` renders it.
  */
-import { load, planLoad, probe, VideoError, type ClipInfo, type LoadOptions,
-         type LoadPlan } from "./decode";
+import { load, planLoad, VideoError, type LoadOptions, type LoadPlan } from "./decode";
 import { Slicer, type SliceOptions } from "./gpu/slicer";
 import { Volume, VolumeTooLarge } from "./gpu/volume";
 import { looping, type Noise } from "./noise";
 import {
-  endpoints, fullSize, liveNoise, loopFades, plan, Problem, readOptions, type FullSize,
-  type OptionValues, type Options,
+  endpoints, liveNoise, loopFades, plan, Problem, readOptions, type OptionValues, type Options,
 } from "./options";
 import { PREVIEW_SCALE, type Sweep, type TX } from "./planner";
 import { limitDenominator, roundHalfEven } from "./pymath";
@@ -36,14 +34,9 @@ export interface FrameInfo {
   line: Ends;
   first: Ends;
   last: Ends;
-  /** What a full-quality render would make, why it can't, or null if that's unknown. */
-  full: FullSize | { error: string } | null;
 }
 
-interface Source { file: File; info: ClipInfo }
-interface Clip {
-  file: File; key: string; volume: Volume; fps: Rate; info: ClipInfo; face?: ImageData;
-}
+interface Clip { file: File; key: string; volume: Volume; fps: Rate; face?: ImageData }
 
 /** What every frame of a sweep shares, for one set of options and the clip they load. */
 interface Sweeping {
@@ -69,7 +62,6 @@ const LOST = "The live view lost the GPU, perhaps for want of memory. Set a shor
 export class Live {
   private readonly gl: WebGL2RenderingContext;
   private slicer: Slicer;
-  private source: Source | null = null;
   private clip: Clip | null = null;
   private loading: AbortController | null = null;
   private parsed: { values: OptionValues; opts: Options } | null = null;
@@ -160,7 +152,6 @@ export class Live {
    * `to` without loading afresh.
    */
   adopt(from: File, to: File): void {
-    if (this.source?.file === from) this.source.file = to;
     if (this.clip?.file === from) this.clip.file = to;
   }
 
@@ -169,7 +160,6 @@ export class Live {
     this.loading?.abort();
     this.loading = null;
     this.release();
-    this.source = null;
   }
 
   dispose(): void {
@@ -212,7 +202,6 @@ export class Live {
         volume: [volume.frames, volume.height, volume.width], memory: volume.bytes,
         loop: sweep.loop, sides: sweep.sides,
         first: endpoints(sweep, 0), last: endpoints(sweep, sweep.frames - 1),
-        full: fullSize(clip.info, opts),
       },
     };
   }
@@ -228,12 +217,12 @@ export class Live {
     this.loading = controller;
     const { signal } = controller;
     try {
-      const { info } = await this.describe(file, signal);
       const options: LoadOptions = {
         scale: opts.scale * PREVIEW_SCALE, timeScale: PREVIEW_SCALE,
         start: opts.start ?? undefined, duration: opts.duration ?? undefined, fast: true, signal,
       };
       const planned = await planLoad(file, options);
+      signal.throwIfAborted();
       // Refuse fades that don't fit before decoding the clip.
       const [frames, columns] = loopFades(planned.frames, planned.width,
                                           planned.fps.num / planned.fps.den, opts, PREVIEW_SCALE);
@@ -253,7 +242,7 @@ export class Live {
         volume.dispose();
         throw error;
       }
-      this.clip = { file, key, volume, fps: planned.fps, info };
+      this.clip = { file, key, volume, fps: planned.fps };
       return this.clip;
     } catch (error) {
       if (signal.aborted) throw signal.reason;  // whatever stopped it on the way
@@ -264,16 +253,6 @@ export class Live {
     } finally {
       if (this.loading === controller) this.loading = null;
     }
-  }
-
-  /** What a file holds, probed once. */
-  private async describe(file: File, signal: AbortSignal): Promise<Source> {
-    if (this.source?.file === file) return this.source;
-    this.source = null;
-    const info = await probe(file);
-    signal.throwIfAborted();
-    this.source = { file, info };
-    return this.source;
   }
 
   /**
