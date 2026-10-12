@@ -21,9 +21,13 @@ export default defineConfig({
           browser: {
             enabled: true,
             headless: true,
-            // Needs Google Chrome installed: Playwright's bundled Chromium lacks H.264.
-            provider: playwright({ launchOptions: { channel: "chrome" } }),
-            instances: [{ browser: "chromium" }],
+            provider: playwright(),
+            instances: [
+              // Needs Google Chrome installed: Playwright's bundled Chromium lacks H.264.
+              { browser: "chromium", provider: playwright({ launchOptions: { channel: "chrome" } }) },
+              // Playwright's own Firefox, from `npx playwright install firefox`.
+              { browser: "firefox" },
+            ],
           },
         },
       },

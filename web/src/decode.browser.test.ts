@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
+import { server } from "vitest/browser";
 import { clipSeconds, load, planLoad, probe, VideoError, type LoadOptions } from "./decode";
 import fixture from "../test/fixtures/decode/decode.json?raw";
 import framesUrl from "../test/fixtures/decode/frames.bin.gz?url";
@@ -87,10 +88,22 @@ describe("probe", () => {
   });
 });
 
+// Firefox's decoders make RGB with libyuv's BT.709 table, whose 2 for Cb's part in blue, not
+// 2.112, puts the palette's colours some 10 levels out in blue.
+const WORST = server.browser === "firefox" ? 6 : 4;
+
+// Whether the browser decodes the HEVC clips' Main profile, as Playwright's Firefox doesn't.
+const hevc = (await VideoDecoder.isConfigSupported({ codec: "hvc1.1.6.L30.B0" })).supported;
+
 describe("planLoad and load match load_video", () => {
   test.each(cases.map((c) => [label(c), c] as const))("%s", async (_, c) => {
     const source = await file(c.clip);
     const options = loadOptions(c.options);
+    if (c.clip.startsWith("hevc-") && !hevc) {
+      await expect(load(source, options, (_, bitmap) => bitmap.close())).rejects.toThrow(
+        new VideoError(`can't decode ${c.clip}: the browser has no decoder for its hevc video`));
+      return;
+    }
     const expected = {
       width: c.width, height: c.height, frames: c.frames.length,
       fps: { num: c.fps[0], den: c.fps[1] },
@@ -121,7 +134,8 @@ describe("planLoad and load match load_video", () => {
     });
     expect(named).toEqual(c.frames);
     const worst = Math.max(...got.map((frame, i) => meanAbsDiff(frame, py[i]!)));
-    expect(worst, "largest mean absolute difference from Python's frame").toBeLessThanOrEqual(4);
+    expect(worst, "largest mean absolute difference from Python's frame")
+      .toBeLessThanOrEqual(WORST);
   });
 });
 
