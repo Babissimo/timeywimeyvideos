@@ -228,8 +228,8 @@ const SMALL: VideoEncoderConfig = {
 };
 
 /**
- * How to configure the encoder for frames of this size: with a quantizer where it takes one,
- * else a variable bitrate. Throws Unencodable where it takes neither.
+ * How to configure the encoder for frames of this size: with a quantizer where it takes and
+ * honours one, else a variable bitrate. Throws Unencodable where it takes neither.
  */
 async function choose(width: number, height: number, fps: Rate, settings: Settings):
     Promise<{ config: VideoEncoderConfig; quantizer: number | null }> {
@@ -240,7 +240,10 @@ async function choose(width: number, height: number, fps: Rate, settings: Settin
     avc: { format: "avc" }, latencyMode: "quality",
   };
   const quantizer: VideoEncoderConfig = { ...base, bitrateMode: "quantizer" };
-  if (await supported(quantizer)) return { config: quantizer, quantizer: settings.quantizer };
+  // Firefox's encoder takes the quantizer mode but ignores the quantizer, coding a preview as a
+  // full render, and in that mode garbles the luma of small frames' P-frames the more often.
+  if (!navigator.userAgent.includes("Firefox/") && await supported(quantizer))
+    return { config: quantizer, quantizer: settings.quantizer };
   const variable: VideoEncoderConfig = { ...base, bitrateMode: "variable",
                                          bitrate: settings.bitrate };
   if (await supported(variable)) return { config: variable, quantizer: null };

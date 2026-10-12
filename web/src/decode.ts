@@ -106,7 +106,7 @@ export async function load(
         if (sample.hasAlpha) {
           const frame = sample.toVideoFrame();
           try {
-            opaque = new VideoSample(new VideoFrame(frame, { alpha: "discard" }),
+            opaque = new VideoSample(await withoutAlpha(frame),
                                      { rotation: sample.rotation, flip: sample.flip });
           } finally {
             frame.close();
@@ -170,6 +170,25 @@ export async function load(
   } finally {
     clip.input.dispose();
   }
+}
+
+/**
+ * The frame without its alpha. Firefox draws an RGB frame's alpha even once discarded, and as if
+ * premultiplied, so such a frame's pixels are copied out with the alpha made opaque.
+ */
+async function withoutAlpha(frame: VideoFrame): Promise<VideoFrame> {
+  if (frame.format !== "RGBA" && frame.format !== "BGRA")
+    return new VideoFrame(frame, { alpha: "discard" });
+  const pixels = new Uint8Array(frame.allocationSize());
+  await frame.copyTo(pixels);  // the visible rectangle, its rows packed tight
+  for (let i = 3; i < pixels.length; i += 4) pixels[i] = 255;
+  const { width, height } = frame.visibleRect!;
+  return new VideoFrame(pixels, {
+    format: frame.format, codedWidth: width, codedHeight: height,
+    displayWidth: frame.displayWidth, displayHeight: frame.displayHeight,
+    timestamp: frame.timestamp, duration: frame.duration ?? undefined,
+    colorSpace: frame.colorSpace.toJSON(), transfer: [pixels.buffer],
+  } as VideoFrameBufferInit);
 }
 
 interface Clip { input: Input; track: InputVideoTrack; name: string; source: Blob }

@@ -342,8 +342,9 @@ it PX narrower (after `--scale`). Like `--loop-fade`, it can be at most half.
 and encodes clips the way `timeslice.py` does.
 
 Run the geometry checks with `uv run pytest` (or `uv run test_timeslice.py`).
-`npm test` runs the page's checks, some of them in Google Chrome, which has to
-be installed. `npm run typecheck` checks the TypeScript. The page's checks
+`npm test` runs the page's checks, some of them in both Google Chrome, which has
+to be installed, and Playwright's Firefox, which `npx playwright install firefox`
+installs. `npm run typecheck` checks the TypeScript. The page's checks
 compare it with `timeslice.py`, through reference values the scripts in
 `web/test/fixtures/` make from it; run one with
 `uv run python web/test/fixtures/<name>.py` to make its values afresh.

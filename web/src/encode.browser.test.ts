@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { server } from "vitest/browser";
 import { codecString, Encoder, settings, Unencodable } from "./encode";
 import { framesOf, readBack } from "./readback";
 import type { Rate } from "./types";
@@ -119,24 +120,29 @@ describe("Encoder", () => {
     near(mean(last, 64, [0, 30], [0, 22]), COLOURS[4], 12);
   });
 
-  test("uses a quantizer where the encoder takes one, else a variable bitrate", async () => {
+  test("uses a quantizer where the encoder takes and honours one, else a variable bitrate",
+       async () => {
     const fps = { num: 30, den: 1 };
     for (const [width, height] of [[1280, 720], [640, 360], [64, 48]]) {
       const quantizer = await VideoEncoder.isConfigSupported({
         codec: codecString(width, height, fps), width, height, framerate: 30,
         bitrateMode: "quantizer", avc: { format: "avc" }, latencyMode: "quality",
       });
+      // Firefox's encoder takes the quantizer mode but ignores the quantizer.
+      const honoured = quantizer.supported && server.browser !== "firefox";
       const { video, rateControl } = await encode(width, height, fps, 3);
       console.log(`${width}×${height}: ${rateControl}`);
-      if (quantizer.supported) expect(rateControl).toBe("quantizer 18");
-      else expect(rateControl).toMatch(/^variable bitrate, \d+ [kM]bit\/s$/);
-      // Whichever encoder it was, the colours come back as they went in, give or take what a
-      // low bitrate loses on a tiny frame.
+      if (honoured) expect(rateControl).toBe("quantizer 18");
+      else expect(rateControl).toMatch(/^variable bitrate, (\d+ kbit|\d+\.\d Mbit)\/s$/);
+      // Whichever encoder it was, the colours come back as they went in, give or take what
+      // the decoder does where it makes RGB with libyuv's BT.709 table: its 2 for Cb's part in
+      // blue, not 2.112, puts these colours up to 9 levels out in blue. Firefox's decoders
+      // do so at any size and Chrome's on tiny frames, where neither browser takes a quantizer.
       expect((await readBack(video)).colour).toEqual(BT709);
       const frames = await framesOf(video, [0, 1, 2]);
       frames.forEach((frame, i) => {
         near(mean(frame, width, [0, width >> 2], [0, height >> 2]), COLOURS[i],
-             quantizer.supported ? 6 : 12);
+             honoured ? 6 : 12);
       });
     }
   });

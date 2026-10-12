@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "vitest";
+import { commands, server, userEvent } from "vitest/browser";
 import { changed, hasChanged, listFolder, Sources } from "./sources";
 
 // The origin's private file system gives real FileSystemDirectoryHandles without asking.
@@ -58,4 +59,24 @@ test("tells when a file has changed since it was opened", async () => {
   expect(await hasChanged(file)).toBe(true);
   expect(changed("clip.mp4"))
     .toBe("clip.mp4 has changed or moved since it was opened: open it, or its folder, again.");
+});
+
+test("tells when a file opened from disk is now shorter, or gone", async () => {
+  const path = `./changing-on-disk-${server.browser}.mp4`;  // each browser runs this at once
+  const input = document.createElement("input");
+  input.type = "file";
+  document.body.append(input);
+  try {
+    await commands.writeFile(path, "first, longer");
+    await userEvent.upload(input, path);
+    const [file] = input.files!;
+    expect(await hasChanged(file)).toBe(false);
+    await commands.writeFile(path, "second");
+    expect(await hasChanged(file)).toBe(true);
+    await commands.removeFile(path);
+    expect(await hasChanged(file)).toBe(true);
+  } finally {
+    input.remove();
+    await commands.removeFile(path).catch(() => {});
+  }
 });
