@@ -2,14 +2,13 @@ import { afterAll, afterEach, describe, expect, test, vi } from "vitest";
 import raw from "../test/fixtures/live.json?raw";
 import h264 from "../test/fixtures/decode/h264-30.mp4?url";
 import rot90 from "../test/fixtures/decode/h264-rot90.mp4?url";
-import { probe } from "./decode";
 import { NOISY } from "./gpu/shaders";
 import { Volume, VolumeTooLarge } from "./gpu/volume";
 import { Live, type FrameInfo } from "./live";
 import { Noise } from "./noise";
-import { endpoints, fullSize, liveNoise, plan, Problem, readOptions } from "./options";
+import { endpoints, liveNoise, plan, Problem, readOptions } from "./options";
 
-type PyFrame = Omit<FrameInfo, "memory" | "full"> & {
+type PyFrame = Omit<FrameInfo, "memory"> & {
   values: Record<string, string>; pos: number; rgb: string;
 };
 
@@ -88,7 +87,6 @@ describe("shows the frames timeslice --preview makes", () => {
       close(info.first, c.first);
       close(info.last, c.last);
       expect(info.memory).toBeGreaterThanOrEqual(yuvBytes(c.volume));  // more before fades
-      expect(info.full).toEqual(fullSize(await probe(SOURCE), readOptions(c.values)));
 
       // The browser decodes a little differently from ffmpeg, so frames match closely but
       // not exactly; the wrong frame or column of the clip would differ by far more.
@@ -361,7 +359,7 @@ describe("Live", () => {
     canvas.addEventListener("webglcontextlost", (event) => event.stopImmediatePropagation());
     const live = new Live(canvas);
     const showing = live.show(SOURCE, {}, 0);
-    canvas.getContext("webgl2")!.getExtension("WEBGL_lose_context")!.loseContext();  // as it probes
+    canvas.getContext("webgl2")!.getExtension("WEBGL_lose_context")!.loseContext();  // as it plans the load
     expect((await problem(showing)).message).toContain("lost the GPU");
     live.dispose();
   });
