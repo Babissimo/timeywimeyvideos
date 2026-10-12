@@ -14,7 +14,7 @@ import {
   loopFades, plan, Problem, readOptions, type OptionValues, type ProblemKind,
 } from "./options";
 import { PREVIEW_SCALE } from "./planner";
-import { gcd, limitDenominator } from "./pymath";
+import { gcd, limitDenominator } from "./numbers";
 import type { Columns, Rate } from "./types";
 
 /** What the page asks for: a render of a clip with the page's options. */

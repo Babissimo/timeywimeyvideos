@@ -4,6 +4,7 @@
 
 import { probe } from "./src/decode.ts";
 import { Live } from "./src/live.ts";
+import { MAX_SEED } from "./src/noise.ts";
 import { fullSize, Problem, readOptions } from "./src/options.ts";
 import { render as renderClip } from "./src/render.ts";
 import { changed, hasChanged, same, Sources, VIDEO_TYPES } from "./src/sources.ts";
@@ -533,6 +534,7 @@ async function openFolder(folder) {
 
 $("source").addEventListener("change", () => chooseSource($("source").value));
 $("file").accept = ["video/*", ...VIDEO_TYPES].join(",");
+$("noise-seed").max = String(MAX_SEED);
 $("file").addEventListener("change", () => {
   openFiles([...$("file").files]);
   $("file").value = "";

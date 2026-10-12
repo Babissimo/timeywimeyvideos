@@ -9,9 +9,7 @@
 // enough from the edges that none leave the video.
 
 import { LruCache } from "./lru";
-import {
-  degrees, formatG, gcd, hypot, ieeeRemainder, pyRepr, radians, roundHalfEven, TAU,
-} from "./pymath";
+import { decimal, gcd } from "./numbers";
 import type { Columns } from "./types";
 
 export const PREVIEW_SCALE = 0.5;  // a preview shrinks x, y and t by this factor
@@ -24,13 +22,6 @@ export class OptionError extends Error {
 /** The frame can't fit inside the video at the requested angle. */
 export class DoesNotFit extends OptionError {
   name = "DoesNotFit";
-}
-
-/** x, unless it is NaN or infinite: Python's round() and int() raise on those, as a plan does. */
-export function refuseNonFinite(x: number): number {
-  if (Number.isNaN(x)) throw new OptionError("cannot convert float NaN to integer");
-  if (!Number.isFinite(x)) throw new OptionError("cannot convert float infinity to integer");
-  return x;
 }
 
 /** A direction or a move in the x-t plane, as (t, x). */
@@ -83,7 +74,7 @@ function push(noise: NoisePush | null | undefined, normal: TX): Readonly<TX> {
  */
 function anglesThatFit(fits: (angle: number) => boolean, limit: number): string {
   const runs: [number, number][] = [];  // [first, last] in tenths of a degree
-  const last = roundHalfEven(limit * 10);
+  const last = Math.round(limit * 10);
   for (let tenth = 0; tenth <= last; tenth++) {
     if (!fits(tenth / 10)) continue;
     const run = runs[runs.length - 1];
@@ -95,10 +86,10 @@ function anglesThatFit(fits: (angle: number) => boolean, limit: number): string 
     return "Only 0 degrees fits this clip.";
   }
   if (runs.length === 1 && runs[0][0] === 0) {
-    return `Angles up to ${formatG(runs[0][1] / 10)} degrees fit this clip.`;
+    return `Angles up to ${decimal(runs[0][1] / 10)} degrees fit this clip.`;
   }
   const spans = runs.map(([a, b]) =>
-    a === b ? formatG(a / 10) : `${formatG(a / 10)} to ${formatG(b / 10)}`);
+    a === b ? decimal(a / 10) : `${decimal(a / 10)} to ${decimal(b / 10)}`);
   return `Angles of ${spans.join(" and ")} degrees fit this clip.`;
 }
 
@@ -106,8 +97,8 @@ function anglesThatFit(fits: (angle: number) => boolean, limit: number): string 
 function tooLong(angle: number, width: number, spanT: number, pushT: number, nFrames: number,
                  kind = ""): string {
   const noise = pushT !== 0
-    ? `, and the noise can push it ${formatG(Math.abs(pushT), 3)} frames either way` : "";
-  return `At ${formatG(angle)} degrees a ${width}-pixel-wide ${kind}frame covers `
+    ? `, and the noise can push it ${decimal(Math.abs(pushT), 3)} frames either way` : "";
+  return `At ${decimal(angle)} degrees a ${width}-pixel-wide ${kind}frame covers `
     + `${Math.ceil(spanT) + 1} frames of time${noise}, but the clip has only ${nFrames}.`;
 }
 
@@ -118,6 +109,7 @@ export const LOOP_WINDINGS = 16;    // most times across the width, or round tim
 export type Windings = [across: number, roundT: number];
 
 const windingsCache = new LruCache<string, Windings>(64);  // the live view plans every frame
+const TOLERANCE = LOOP_TOLERANCE * Math.PI / 180;
 
 /**
  * How many times (a, b) a loop through a clip whose sides and ends wrap round should go across
@@ -134,9 +126,11 @@ export function windings(width: number, nFrames: number, dx: number, dt: number)
   for (let a = -LOOP_WINDINGS; a <= LOOP_WINDINGS; a++) {
     for (let b = -LOOP_WINDINGS; b <= LOOP_WINDINGS; b++) {
       if (gcd(a, b) !== 1) continue;  // not a closed path, or one gone round twice
-      const off = Math.abs(ieeeRemainder(Math.atan2(b * nFrames, a * width) - aim, TAU));
-      const length = hypot(a * width, b * nFrames);
-      const k: [number, number] = degrees(off) <= LOOP_TOLERANCE ? [0, length] : [1, off];
+      // How far the path's direction is from the aim, either way round.
+      let off = Math.abs(Math.atan2(b * nFrames, a * width) - aim);
+      if (off > Math.PI) off = 2 * Math.PI - off;
+      const length = Math.hypot(a * width, b * nFrames);
+      const k: [number, number] = off <= TOLERANCE ? [0, length] : [1, off];
       if (bestKey === null || k[0] < bestKey[0] || (k[0] === bestKey[0] && k[1] < bestKey[1])) {
         bestKey = k;
         best = [a, b];
@@ -148,16 +142,19 @@ export function windings(width: number, nFrames: number, dx: number, dt: number)
 }
 
 function pushedSideways(angle: number, pushX: number): string {
-  return `At ${formatG(angle)} degrees the noise can push the ends of the frame `
-    + `${formatG(Math.abs(pushX), 3)} pixels sideways, out of the video.`;
+  return `At ${decimal(angle)} degrees the noise can push the ends of the frame `
+    + `${decimal(Math.abs(pushX), 3)} pixels sideways, out of the video.`;
+}
+
+/** x rounded to 12 decimal places, so that a value a hair off a whole number lands on it. */
+function snap(x: number): number {
+  return Math.round(x * 1e12) / 1e12;
 }
 
 /** cos and sin of the angle, rounded so that 0, 90, 180... degrees land exactly on the grid. */
 export function rotation(angle: number): TX {
-  const theta = radians(angle);
-  // Python has no cosine of infinity.
-  if (Math.abs(theta) === Infinity) throw new OptionError("math domain error");
-  return [roundHalfEven(Math.cos(theta), 12), roundHalfEven(Math.sin(theta), 12)];
+  const theta = angle * Math.PI / 180;
+  return [snap(Math.cos(theta)), snap(Math.sin(theta))];
 }
 
 /**
@@ -223,7 +220,7 @@ export function rotationSweep(nFrames: number, width: number, angle: number,
       const [across, roundT] = windings(width, nFrames, -s, c);
       const spanX = across * width, spanT = roundT * nFrames;
       // About a pixel a frame.
-      outFrames = Math.max(1, roundHalfEven(refuseNonFinite(hypot(spanX, spanT))));
+      outFrames = Math.max(1, Math.round(Math.hypot(spanX, spanT)));
       dx = spanX / outFrames;
       dt = spanT / outFrames;
     } else {
@@ -233,10 +230,8 @@ export function rotationSweep(nFrames: number, width: number, angle: number,
     }
   } else if (!inside) {
     const ahead = Math.abs(pushT * c - pushX * s);  // how far bumps reach off the plane
-    outWidth = Math.max(1, roundHalfEven(refuseNonFinite(
-      width * Math.abs(c) + nFrames * Math.abs(s))));
-    outFrames = Math.max(1, roundHalfEven(refuseNonFinite(
-      width * Math.abs(s) + nFrames * Math.abs(c) + 2 * ahead)));
+    outWidth = Math.max(1, Math.round(width * Math.abs(c) + nFrames * Math.abs(s)));
+    outFrames = Math.max(1, Math.round(width * Math.abs(s) + nFrames * Math.abs(c) + 2 * ahead));
     dx = -s;
     dt = c;
   } else {
@@ -251,29 +246,24 @@ export function rotationSweep(nFrames: number, width: number, angle: number,
       throw new DoesNotFit(why + " " + anglesThatFit(
         (a) => Math.min(...rotationRoom(nFrames, width, a, noise)) >= 0, 90));
     }
-    motion = motion || "longest";
     if (motion === "perpendicular") {
       dx = -s;
       dt = c;
     } else if (motion === "time") {
       dx = 0;
       dt = signT;
-    } else if (motion === "longest") {
-      // The diagonal of the region the centre can move in. Of the two diagonals, take the one
-      // closer to perpendicular, so the frame sweeps through the video rather than sliding
-      // along itself.
+    } else {
+      // The longest line: the diagonal of the region the centre can move in. Of the two
+      // diagonals, take the one closer to perpendicular, so the frame sweeps through the video
+      // rather than sliding along itself.
       dx = s >= 0 ? -roomX : roomX;
       dt = signT * roomT;
-      const length = hypot(dx, dt);
-      [dx, dt] = length !== 0 ? [dx / length, dt / length] : [0, signT];  // NaN is a length
-    } else {
-      throw new OptionError(`unknown motion ${pyRepr(motion)}`);
+      const length = Math.hypot(dx, dt);
+      [dx, dt] = length !== 0 ? [dx / length, dt / length] : [0, signT];
     }
-    // As in Python, a NaN is a direction, and a NaN second loses a min to the first.
     const alongX = dx !== 0 ? roomX / Math.abs(dx) : Infinity;
     const alongT = dt !== 0 ? roomT / Math.abs(dt) : Infinity;
-    const reach = alongT < alongX ? alongT : alongX;
-    outFrames = Math.trunc(refuseNonFinite(2 * reach + 1e-9)) + 1;
+    outFrames = Math.trunc(2 * Math.min(alongT, alongX) + 1e-9) + 1;
   }
 
   const centreX = (width - 1) / 2, centreT = (nFrames - 1) / 2;
@@ -296,10 +286,8 @@ export function rotationSweep(nFrames: number, width: number, angle: number,
 
 /** The delay per pixel across a sheared frame, and its plane's (t, x) unit normal. */
 function shear(angle: number): [number, TX] {
-  // Math.tan can differ from libm's by an ulp, which the rounding keeps at steep angles: k, and
-  // so each position per pixel across the frame, can be 1e-12 from Python's.
-  const k = roundHalfEven(Math.tan(radians(angle)), 12);
-  const h = hypot(1, k);
+  const k = snap(Math.tan(angle * Math.PI / 180));
+  const h = Math.hypot(1, k);
   return [k, [1 / h, -k / h]];
 }
 
@@ -342,9 +330,6 @@ export function shearSweep(nFrames: number, width: number, angle: number,
   }
   const [k, normal] = shear(angle);
   const [pushT, pushX] = push(noise, normal);
-  // Python lays the columns out with arange, which refuses these.
-  if (Number.isNaN(width)) throw new OptionError("arange: cannot compute length");
-  if (!Number.isFinite(width)) throw new OptionError("Maximum allowed size exceeded");
   const middle = (width - 1) / 2;
   const spanT = Math.abs(k) * (width - 1);  // frames of time one output frame covers
   let outFrames: number;
@@ -353,8 +338,8 @@ export function shearSweep(nFrames: number, width: number, angle: number,
     const [roomT, roomX] = shearRoom(nFrames, width, angle, noise);
     if (roomX < 0 && !sides) {
       throw new DoesNotFit(
-        `At ${formatG(angle)} degrees perpendicular noise can push the ends of a sheared frame `
-        + `${formatG(Math.abs(pushX), 3)} pixels sideways, out of the video, and a sheared `
+        `At ${decimal(angle)} degrees perpendicular noise can push the ends of a sheared frame `
+        + `${decimal(Math.abs(pushX), 3)} pixels sideways, out of the video, and a sheared `
         + "frame always spans the video's whole width. Push the noise through time instead.");
     }
     if (roomT < 0 && !loop) {
@@ -362,10 +347,9 @@ export function shearSweep(nFrames: number, width: number, angle: number,
         tooLong(angle, width, spanT, pushT, nFrames, "sheared ") + " " + anglesThatFit(
           (a) => Math.min(...shearRoom(nFrames, width, a, noise)) >= 0, 89.9));
     }
-    outFrames = loop ? nFrames : Math.trunc(refuseNonFinite(roomT + 1e-9)) + 1;
+    outFrames = loop ? nFrames : Math.trunc(roomT + 1e-9) + 1;
   } else {
-    outFrames = Math.trunc(refuseNonFinite(
-      nFrames - 1 + spanT + 2 * Math.abs(pushT) + 1e-9)) + 1;
+    outFrames = Math.trunc(nFrames - 1 + spanT + 2 * Math.abs(pushT) + 1e-9) + 1;
   }
 
   const centreT = (nFrames - 1) / 2;
@@ -388,8 +372,5 @@ export function planSweep(nFrames: number, width: number,
                           { slice = "rotate", angle = 45.0, inside = false, motion = null,
                             noise = null, loop = false, sides = false }: PlanOptions = {}): Sweep {
   if (slice === "shear") return shearSweep(nFrames, width, angle, { inside, noise, loop, sides });
-  if (slice === "rotate") {
-    return rotationSweep(nFrames, width, angle, { inside, motion, noise, loop, sides });
-  }
-  throw new OptionError(`unknown slice ${pyRepr(slice)}`);
+  return rotationSweep(nFrames, width, angle, { inside, motion, noise, loop, sides });
 }

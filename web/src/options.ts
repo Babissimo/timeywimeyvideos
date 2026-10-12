@@ -3,11 +3,11 @@
  * a loop to crossfade, and what a full-quality render would make.
  */
 import { clipSeconds, type ClipInfo } from "./decode";
-import { Noise } from "./noise";
+import { MAX_SEED, Noise } from "./noise";
+import { decimal, gcd, roundHalfEven } from "./numbers";
 import {
   DoesNotFit, OptionError, planSweep, PREVIEW_SCALE, type Motion, type SliceKind, type Sweep,
 } from "./planner";
-import { formatG, pyRepr, roundHalfEven } from "./pymath";
 import type { Rate } from "./types";
 
 /** What kind of problem it is, for the way out the page offers. */
@@ -52,117 +52,64 @@ export interface Options {
 export interface FullSize { width: number; height: number; frames: number; seconds: number;
                             memory: number }
 
-const DIGITS = String.raw`\d(?:_?\d)*`;  // underscores only between digits
-const MAX_DIGITS = 4300;  // the most int() reads, as sys.get_int_max_str_digits() gives
-const FLOAT = new RegExp(String.raw`^[+-]?(?:(?:${DIGITS}(?:\.(?:${DIGITS})?)?|\.${DIGITS})`
-                         + String.raw`(?:e[+-]?${DIGITS})?|inf(?:inity)?|nan)$`, "i");
-const INT = new RegExp(String.raw`^[+-]?${DIGITS}$`);
-// Python's fractions._RATIONAL_FORMAT.
-const FRACTION = new RegExp(String.raw`^\s*([-+]?)(?=\d|\.\d)(\d*|\d+(?:_\d+)*)`
-                            + String.raw`(?:(?:\s*/\s*(\d+(?:_\d+)*))?`
-                            + String.raw`|(?:\.(\d*|\d+(?:_\d+)*))?(?:E([-+]?\d+(?:_\d+)*))?)\s*$`,
-                            "i");
+/** Whether a field was left empty. */
+function empty(value: unknown): boolean {
+  return value === undefined || value === null || (typeof value === "string" && !value.trim());
+}
 
-/** A value as Python's float() reads it, or undefined where float() would raise. */
-function pyFloat(value: unknown): number | undefined {
+/** A field's value as a number: NaN where it isn't one. */
+function toNumber(value: unknown): number {
   if (typeof value === "number") return value;
-  if (typeof value === "boolean") return Number(value);
-  if (typeof value !== "string") return undefined;
-  const text = value.trim();
-  if (!FLOAT.test(text)) return undefined;
-  const word = text.replace(/^[+-]/, "").toLowerCase();
-  if (word === "nan") return NaN;
-  if (word.startsWith("inf")) return text.startsWith("-") ? -Infinity : Infinity;
-  return Number(text.replaceAll("_", ""));
+  return typeof value === "string" ? Number(value) : NaN;
 }
 
-/** A value as Python's int() reads it, or undefined where int() would raise. */
-function pyInt(value: unknown): bigint | undefined {
-  if (typeof value === "number")
-    return Number.isFinite(value) ? BigInt(Math.trunc(value)) : undefined;
-  if (typeof value === "boolean") return BigInt(value);
-  if (typeof value !== "string" || !INT.test(value.trim())) return undefined;
-  const text = value.trim().replaceAll("_", "");
-  return text.replace(/^[+-]/, "").length <= MAX_DIGITS ? BigInt(text) : undefined;
-}
-
-/**
- * A string as Python's Fraction() reads it, or undefined where Fraction() would raise or a
- * double can't hold the numerator or denominator.
- */
-function pyFraction(text: string): Rate | undefined {
-  const match = FRACTION.exec(text);
+/** A positive frame rate written as a number or a fraction, such as 24, 29.97 or 30000/1001. */
+function readRate(text: string): Rate | undefined {
+  const match = /^\s*(\d+)(?:\.(\d+))?\s*(?:\/\s*(\d+)\s*)?$/.exec(text);
   if (!match) return undefined;
-  const [, sign, whole = "", over, decimal = "", exp = "0"] =
-    match.map((group) => group?.replaceAll("_", ""));
-  if ([whole, over ?? "", decimal, exp.replace(/^[-+]/, "")].some((d) => d.length > MAX_DIGITS))
+  const [, whole, fraction = "", over = "1"] = match;
+  const num = Number(whole + fraction), den = Number(over) * 10 ** fraction.length;
+  if (!(num > 0 && den > 0 && Number.isSafeInteger(num) && Number.isSafeInteger(den)))
     return undefined;
-  let num: bigint, den: bigint;
-  if (over) {
-    num = BigInt(whole || "0");
-    den = BigInt(over);
-    if (den === 0n) return undefined;
-  } else {
-    // The digits times 10 to the power shift.
-    const digits = whole + decimal, shift = Number(exp) - decimal.length;
-    // Past these, a double can't hold the numerator or denominator.
-    if (shift > 308 || -shift > 308 + digits.length) return undefined;
-    num = BigInt(digits || "0") * 10n ** BigInt(Math.max(shift, 0));
-    den = 10n ** BigInt(Math.max(-shift, 0));
-  }
-  if (sign === "-") num = -num;
-  let [a, b] = [num < 0n ? -num : num, den];  // their greatest common divisor, once b is 0
-  while (b) [a, b] = [b, a % b];
-  const rate = { num: Number(num / a), den: Number(den / a) };
-  return Number.isFinite(rate.num) && Number.isFinite(rate.den) ? rate : undefined;
+  const divisor = gcd(num, den);
+  return { num: num / divisor, den: den / divisor };
 }
-
-/** Python's str() of a value, as far as the page's values go. */
-function pyStr(value: unknown): string {
-  if (value === undefined) return "";
-  if (value === null) return "None";
-  if (typeof value === "boolean") return value ? "True" : "False";
-  return String(value);
-}
-
-const repr = (value: unknown) => typeof value === "string" ? pyRepr(value) : pyStr(value);
 
 /** Read the page's options, or throw the Problem with the first value refused. */
 export function readOptions(values: OptionValues): Options {
   function number<T extends number | null>(name: string, fallback: T, low = -Infinity,
                                            above?: number): number | T {
     const value = values[name];
-    if (value === undefined || value === null || value === "") return fallback;
-    const n = pyFloat(value);
-    if (n === undefined) throw new Problem(`${name} must be a number.`);
+    if (empty(value)) return fallback;
+    const n = toNumber(value);
+    if (Number.isNaN(n)) throw new Problem(`${name} must be a number.`);
     if (!Number.isFinite(n) || n < low || (above !== undefined && n <= above))
       throw new Problem(`${name} is out of range.`);
     return n;
   }
 
-  const flag = (name: string) => ["1", "true"].includes(pyStr(values[name]).toLowerCase());
+  const flag = (name: string) => ["1", "true"].includes(String(values[name]).toLowerCase());
+  const quoted = (value: unknown) => JSON.stringify(value);
 
   const slice = values.slice || "rotate";
-  if (slice !== "rotate" && slice !== "shear") throw new Problem(`Unknown slice ${repr(slice)}.`);
+  if (slice !== "rotate" && slice !== "shear")
+    throw new Problem(`Unknown slice ${quoted(slice)}.`);
   const loop = flag("loop");
   const sides = loop && flag("loop_sides");
   const inside = flag("inside") && !loop;  // a looping frame is always inside
   let motion = values.motion || null;
   if (motion !== null && motion !== "perpendicular" && motion !== "time" && motion !== "longest")
-    throw new Problem(`Unknown motion ${repr(motion)}.`);
+    throw new Problem(`Unknown motion ${quoted(motion)}.`);
   if (slice === "shear" || !(inside || sides)) {
     motion = null;  // only these rotate frames can move different ways
   } else if (sides && motion === "longest") {
     throw new Problem("A loop round the sides moves through time or perpendicular to the "
                       + "frame: no line on it is the longest.");
   }
-  const fpsValue = values.fps || null;
   let fps: Rate | null = null;
-  if (fpsValue !== null) {
-    const rate = pyFraction(pyStr(fpsValue));
-    if (rate === undefined || rate.num <= 0)
-      throw new Problem("Output fps must be a positive number, like 24 or 30000/1001.");
-    fps = rate;
+  if (!empty(values.fps)) {
+    fps = readRate(String(values.fps)) ?? null;
+    if (!fps) throw new Problem("Output fps must be a positive number, like 24 or 30000/1001.");
   }
 
   let noise: Noise | null = null;
@@ -171,20 +118,10 @@ export function readOptions(values: OptionValues): Options {
     const plain = new Noise(amplitude);  // for its defaults
     const direction = values.noise_direction || plain.direction;
     if (direction !== "time" && direction !== "perpendicular")
-      throw new Problem(`Unknown noise direction ${repr(direction)}.`);
-    let seed = plain.seed;
-    const given = values.noise_seed;
-    if (given !== undefined && given !== null && given !== "") {
-      const whole = pyInt(given);
-      if (whole === undefined || whole < 0n)
-        throw new Problem("The noise seed must be a whole number, 0 or more.");
-      // Python reads larger seeds, but a double can't hold them exactly.
-      if (whole > BigInt(Number.MAX_SAFE_INTEGER)) {
-        throw new Problem("The noise seed must be a whole number from 0 to "
-                          + `${Number.MAX_SAFE_INTEGER}.`);
-      }
-      seed = Number(whole);
-    }
+      throw new Problem(`Unknown noise direction ${quoted(direction)}.`);
+    const seed = empty(values.noise_seed) ? plain.seed : toNumber(values.noise_seed);
+    if (!(Number.isInteger(seed) && seed >= 0 && seed <= MAX_SEED))
+      throw new Problem(`The noise seed must be a whole number from 0 to ${MAX_SEED}.`);
     const size = number("noise_size", plain.size, -Infinity, 0);
     const speed = number("noise_speed", plain.speed);
     noise = new Noise(amplitude, { size, speed, direction, seed });
@@ -232,15 +169,15 @@ export function plan(nFrames: number, width: number, opts: Options,
  */
 export function loopFades(nFrames: number, width: number, rate: number, opts: Options,
                           shrink = 1): [number, number] {
-  const frames = roundHalfEven(opts.loopFade * rate);
-  const columns = roundHalfEven(opts.sideFade * shrink);
+  const frames = Math.round(opts.loopFade * rate);
+  const columns = Math.round(opts.sideFade * shrink);
   if (2 * frames > nFrames) {
     throw new Problem("The crossfade at the ends can be at most half the clip, "
-                      + `${formatG(nFrames / 2 / rate, 3)} s.`);
+                      + `${decimal(nFrames / 2 / rate, 3)} s.`);
   }
   if (2 * columns > width) {
     throw new Problem("The crossfade at the sides can be at most half the width, "
-                      + `${formatG(width / shrink / 2)} pixels.`);
+                      + `${decimal(width / shrink / 2)} pixels.`);
   }
   return [frames, columns];
 }
@@ -258,10 +195,11 @@ export function endpoints(sweep: Sweep, f: number): [number, number, number, num
 export function fullSize(clip: ClipInfo, opts: Options): FullSize | { error: string } | null {
   const seconds = clipSeconds(clip.duration, opts.start ?? undefined, opts.duration ?? undefined);
   if (seconds === null) return null;
+  // Scaled as decode.ts scales the clip.
   const width = Math.max(1, roundHalfEven(clip.width * opts.scale));
   const height = Math.max(1, roundHalfEven(clip.height * opts.scale));
   const rate = clip.fps.num / clip.fps.den;
-  const nFrames = Math.max(1, roundHalfEven(seconds * rate));
+  const nFrames = Math.max(1, Math.round(seconds * rate));
   let sweep: Sweep;
   try {
     const [frames, columns] = loopFades(nFrames, width, rate, opts);

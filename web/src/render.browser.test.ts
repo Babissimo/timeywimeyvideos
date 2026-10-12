@@ -97,6 +97,19 @@ describe("renders as recorded", () => {
 });
 
 describe("render", () => {
+  test("bends the slice with surface noise", async () => {
+    const file = await clip("h264-30.mp4");
+    const flat = await render(file, { angle: "45", loop: "1" }, { preview: true });
+    const bumpy = await render(file, { angle: "45", loop: "1", noise: "3", noise_seed: "2" },
+                               { preview: true });
+    expect([bumpy.width, bumpy.height, bumpy.frames]).toEqual([flat.width, flat.height,
+                                                                 flat.frames]);
+    const [[a], [b]] = [await framesOf(flat.video, [3]), await framesOf(bumpy.video, [3])];
+    let sum = 0;
+    for (let i = 0; i < a.length; i++) if (i % 4 !== 3) sum += Math.abs(a[i] - b[i]);
+    expect(sum / (a.length * 3 / 4)).toBeGreaterThan(2);
+  });
+
   test("stops the worker when cancelled", async () => {
     const { start, ended } = watched();
     const controller = new AbortController();

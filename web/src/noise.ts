@@ -3,8 +3,8 @@
 // whole-number lattice and swelling up or down in between.
 
 import { LruCache } from "./lru";
-import { OptionError, refuseNonFinite, type Sweep, type TX } from "./planner";
-import { copysign, floorMod, pyRepr, roundHalfEven } from "./pymath";
+import { floorMod } from "./numbers";
+import type { Sweep, TX } from "./planner";
 import type { NoiseGrid } from "./types";
 
 // No value of noise3 is further from 0 than this. Each lattice corner adds g.d, the dot
@@ -72,129 +72,29 @@ export function noise3(perm: ArrayLike<number>, x: number, y: number, z: number,
                                   grad(perm[bb + Z1], x - 1, y - 1, z - 1))));
 }
 
-// The lattice hash is numpy's default_rng(seed).permutation(256). default_rng spreads the seed
-// through a SeedSequence into the 128-bit state and increment of a PCG64 generator, and the
-// shuffle swaps each place from the last down with one drawn by random_interval.
-
-const INIT_A = 0x43b0d7e5, MULT_A = 0x931e8875, INIT_B = 0x8b51f9dd, MULT_B = 0x58f38ded;
-const MIX_MULT_L = 0xca01f9dd, MIX_MULT_R = 0x4973f715;
-
-/** SeedSequence(seed).generate_state(4, np.uint64): four 64-bit words. */
-function seedState(seed: number): bigint[] {
-  const entropy: number[] = [];  // the seed in 32-bit words, lowest first
-  let rest = BigInt(seed);
-  do {
-    entropy.push(Number(rest & 0xffffffffn));
-    rest >>= 32n;
-  } while (rest > 0n);
-
-  let hashConst = INIT_A;
-  const hashmix = (value: number): number => {
-    value = (value ^ hashConst) >>> 0;
-    hashConst = Math.imul(hashConst, MULT_A) >>> 0;
-    value = Math.imul(value, hashConst) >>> 0;
-    return (value ^ (value >>> 16)) >>> 0;
-  };
-  const mix = (x: number, y: number): number => {
-    const result = (Math.imul(MIX_MULT_L, x) - Math.imul(MIX_MULT_R, y)) >>> 0;
-    return (result ^ (result >>> 16)) >>> 0;
-  };
-  const pool = [0, 1, 2, 3].map((i) => hashmix(i < entropy.length ? entropy[i] : 0));
-  for (let src = 0; src < 4; src++) {
-    for (let dst = 0; dst < 4; dst++) {
-      if (src !== dst) pool[dst] = mix(pool[dst], hashmix(pool[src]));
-    }
-  }
-  for (let src = 4; src < entropy.length; src++) {
-    for (let dst = 0; dst < 4; dst++) pool[dst] = mix(pool[dst], hashmix(entropy[src]));
-  }
-
-  const words: number[] = [];
-  hashConst = INIT_B;
-  for (let i = 0; i < 8; i++) {
-    let value = (pool[i % 4] ^ hashConst) >>> 0;
-    hashConst = Math.imul(hashConst, MULT_B) >>> 0;
-    value = Math.imul(value, hashConst) >>> 0;
-    words.push((value ^ (value >>> 16)) >>> 0);
-  }
-  // Pairs of 32-bit words, little-endian.
-  return [0, 1, 2, 3].map((i) => BigInt(words[2 * i]) | (BigInt(words[2 * i + 1]) << 32n));
-}
-
-const MASK64 = (1n << 64n) - 1n;
-const MASK128 = (1n << 128n) - 1n;
-const PCG_MULTIPLIER = (2549297995355413924n << 64n) | 4865540595714422341n;
-
-/** numpy's PCG64 (XSL-RR 128/64), with its 32-bit draws taken a half of a 64-bit one at a time. */
-class Pcg64 {
-  private state = 0n;
-  private readonly inc: bigint;
-  private spare: number | null = null;  // the high half of the last 64-bit draw, not yet used
-
-  constructor(initState: bigint, initSeq: bigint) {
-    this.inc = ((initSeq << 1n) | 1n) & MASK128;
-    this.step();
-    this.state = (this.state + initState) & MASK128;
-    this.step();
-  }
-
-  private step(): void {
-    this.state = (this.state * PCG_MULTIPLIER + this.inc) & MASK128;
-  }
-
-  next64(): bigint {
-    this.step();
-    const high = this.state >> 64n;
-    const value = high ^ (this.state & MASK64);
-    const rot = high >> 58n;
-    return ((value >> rot) | (value << ((64n - rot) & 63n))) & MASK64;
-  }
-
-  next32(): number {
-    if (this.spare !== null) {
-      const spare = this.spare;
-      this.spare = null;
-      return spare;
-    }
-    const next = this.next64();
-    this.spare = Number(next >> 32n);
-    return Number(next & 0xffffffffn);
-  }
-}
-
-/** numpy's random_interval: a draw from 0 to max (at most 2^32 - 1), masked and retried. */
-function randomInterval(rng: Pcg64, max: number): number {
-  if (max === 0) return 0;
-  let mask = max;
-  for (const shift of [1, 2, 4, 8, 16]) mask = (mask | (mask >>> shift)) >>> 0;
-  let value: number;
-  do value = (rng.next32() & mask) >>> 0; while (value > max);
-  return value;
-}
-
-const permutations = new LruCache<number, Int32Array>(16);
+export const MAX_SEED = 2 ** 32 - 1;
 
 /**
- * The shuffled lattice hash for a seed, written out twice so that indexing past 255 wraps
- * around. A new array each call, from a table kept for the 16 seeds used last.
+ * The lattice hash for a seed from 0 to MAX_SEED: 0 to 255 shuffled, written out twice so that
+ * indexing past 255 wraps round. The shuffle is Fisher-Yates, drawing from mulberry32.
  */
 export function permutation(seed: number): Int32Array {
-  const cached = permutations.get(seed);
-  if (cached) return cached.slice();
-  if (!Number.isInteger(seed)) throw new TypeError("seed must be integer");
-  if (seed < 0) throw new OptionError("expected non-negative integer");
-  const [s0, s1, i0, i1] = seedState(seed);
-  const rng = new Pcg64((s0 << 64n) | s1, (i0 << 64n) | i1);
+  let state = seed >>> 0;
+  const random = (): number => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 2 ** 32;
+  };
   const p = Array.from({ length: 256 }, (_, i) => i);
   for (let i = 255; i >= 1; i--) {
-    const j = randomInterval(rng, i);
+    const j = Math.floor(random() * (i + 1));
     [p[i], p[j]] = [p[j], p[i]];
   }
   const table = new Int32Array(512);
   table.set(p);
   table.set(p, 256);
-  permutations.set(seed, table);
-  return table.slice();
+  return table;
 }
 
 interface Nodes { coords: Float64Array; first: Int32Array; weights: Float64Array }
@@ -275,10 +175,7 @@ export class Noise {
    */
   push(normal: Readonly<TX>): TX {
     if (this.direction === "time") return [this.amplitude, 0.0];
-    if (this.direction === "perpendicular") {
-      return [this.amplitude * normal[0], this.amplitude * normal[1]];
-    }
-    throw new OptionError(`unknown noise direction ${pyRepr(this.direction)}`);
+    return [this.amplitude * normal[0], this.amplitude * normal[1]];
   }
 
   /**
@@ -303,16 +200,14 @@ export class Noise {
    * each column and row.
    */
   grid(width: number, height: number, f: number): NoiseGrid {
-    if (this.size === 0) throw new RangeError("float division by zero");  // as Python's / does
     const across = nodes(width, this.size), down = nodes(height, this.size);
     let z = f * this.speed / this.size, cells = 0;
     if (this.period !== 0 && this.speed !== 0) {
       // A whole number of lattice cells per period, for the noise to wrap round in. At least
       // 2: in a ring of 1 the planes either side of a cell are the same, so the bumps barely
       // change.
-      cells = Math.max(
-        2, roundHalfEven(refuseNonFinite(this.period * Math.abs(this.speed) / this.size)));
-      z = copysign(f * cells / this.period, this.speed);
+      cells = Math.max(2, Math.round(this.period * Math.abs(this.speed) / this.size));
+      z = Math.sign(this.speed) * f * cells / this.period;
     }
     const perm = permutation(this.seed);
     const nodeRows = down.coords.length, nodeCols = across.coords.length;

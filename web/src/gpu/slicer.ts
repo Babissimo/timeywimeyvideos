@@ -1,5 +1,5 @@
 /** Slices a volume on the GPU as timeslice.sample_columns and sample_noisy_columns do. */
-import { floorMod } from "../pymath";
+import { floorMod } from "../numbers";
 import type { Columns, NoiseGrid } from "../types";
 import { bind, DataTexture, dataTexture, fill, framebuffer, program, type Program } from "./gl";
 import { COVER, FLAT, NOISY, SHOW } from "./shaders";
