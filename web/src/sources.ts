@@ -51,17 +51,17 @@ export async function listFolder(folder: Folder): Promise<Listing> {
 }
 
 /**
- * Whether the browser now refuses to read a file. A File is the file as it was when opened, and
- * once that changes or moves, every read of it fails, which the decoder takes for a file with no
- * video in it.
+ * Whether a file has changed or moved since it was opened, which the decoder takes for a file
+ * with no video in it. Chrome then refuses every read of the File. Firefox reads on through most
+ * changes, but throws AbortError for a file gone, and ends early in one now shorter.
  */
 export async function hasChanged(file: Blob): Promise<boolean> {
   try {
-    await file.slice(0, 1).arrayBuffer();
-    return false;
+    const last = await file.slice(file.size - 1).arrayBuffer();
+    return file.size > 0 && last.byteLength === 0;
   } catch (error) {
     return error instanceof DOMException
-      && (error.name === "NotReadableError" || error.name === "NotFoundError");
+      && ["NotReadableError", "NotFoundError", "AbortError"].includes(error.name);
   }
 }
 
