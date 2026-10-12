@@ -169,16 +169,6 @@ button.quiet { background: none; padding: 4px 8px; margin-top: 6px; }
 
 .error { color: var(--danger); white-space: pre-wrap; }
 
-.command {
-  margin: 8px 0 0;
-  padding: 8px 10px;
-  background: var(--raised);
-  border-radius: 6px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  user-select: all;
-}
-
 .link {
   padding: 0;
   background: none;

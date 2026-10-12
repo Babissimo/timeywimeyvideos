@@ -1,6 +1,6 @@
 /**
  * The live preview: a copy of the clip at half size in x, y and time, held on the GPU in YUV
- * 4:2:0 and sliced there a frame at a time, as `timeslice.py --preview` renders it.
+ * 4:2:0 and sliced there a frame at a time, as a render preview makes it.
  */
 import { load, planLoad, VideoError, type LoadOptions, type LoadPlan } from "./decode";
 import { Slicer, type SliceOptions } from "./gpu/slicer";

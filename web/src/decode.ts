@@ -203,7 +203,8 @@ async function open(source: Blob): Promise<Clip> {
     input.dispose();
     const kind = error instanceof UnsupportedInputFormatError ? await container(source) : null;
     if (kind) {
-      throw new VideoError(`can't read ${name}: the browser can't open ${kind} files`, { cause: error });
+      throw new VideoError(`The browser can't open ${kind} files such as ${name}. Convert it to `
+                           + "an H.264 MP4 first.", { cause: error });
     }
     throw new VideoError(`can't read a video stream from ${name}`, { cause: error });
   }
@@ -214,14 +215,14 @@ async function open(source: Blob): Promise<Clip> {
   return { input, track, name, source };
 }
 
-// Containers ffmpeg reads and Mediabunny doesn't, by the bytes they start with.
+// Containers Mediabunny doesn't read, by the bytes they start with, so the page can name them.
 const CONTAINERS: [string, number, string][] = [
   ["AVI", 8, "AVI "], ["FLV", 0, "FLV"], ["MPEG program stream", 0, "\x00\x00\x01\xba"],
   ["ASF", 0, "\x30\x26\xb2\x75\x8e\x66\xcf\x11"], ["RealMedia", 0, ".RMF"],
   ["MXF", 0, "\x06\x0e\x2b\x34"], ["IVF", 0, "DKIF"], ["Y4M", 0, "YUV4MPEG2"], ["GIF", 0, "GIF8"],
 ];
 
-/** The name of the container `source` is in, if it is one ffmpeg reads and the browser doesn't. */
+/** The name of the container `source` is in, if it is one of CONTAINERS. */
 async function container(source: Blob): Promise<string | null> {
   const head = String.fromCharCode(...new Uint8Array(await source.slice(0, 16).arrayBuffer()));
   return CONTAINERS.find(([, at, magic]) => head.startsWith(magic, at))?.[0] ?? null;
@@ -680,7 +681,8 @@ async function plan(clip: Clip, options: LoadOptions): Promise<Plan> {
   const codec = await clip.track.getCodec();
   if (!codec || !(await clip.track.canDecode())) {
     const kind = codec ?? await clip.track.getInternalCodecId() ?? "unknown";
-    throw new VideoError(`can't decode ${clip.name}: the browser has no decoder for its ${kind} video`);
+    throw new VideoError(`The browser has no decoder for the ${kind} video in ${clip.name}. `
+                         + "Convert it to an H.264 MP4 first.");
   }
   const timeline = await readTimeline(clip, signal);
   const kept = multiply(timeline.info.fps, share);

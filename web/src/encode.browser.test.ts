@@ -56,7 +56,7 @@ afterEach(() => {
 });
 
 describe("Encoder", () => {
-  test("pads odd sizes with black, as ffmpeg's pad filter does", async () => {
+  test("pads odd sizes with black", async () => {
     const fps = { num: 30000, den: 1001 };
     const encoded = await encode(33, 25, fps, 12);
     expect([encoded.width, encoded.height]).toEqual([34, 26]);

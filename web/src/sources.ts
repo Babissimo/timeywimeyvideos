@@ -6,7 +6,7 @@
 
 /** The extensions of the videos a folder's listing offers. */
 export const VIDEO_TYPES: ReadonlySet<string> =
-  new Set([".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".gif"]);
+  new Set([".mp4", ".mov", ".m4v", ".mkv", ".webm"]);
 
 /** Whether a file's name ends in one of VIDEO_TYPES, in any case. A hidden file's never does. */
 export function isVideo(name: string): boolean {

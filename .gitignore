@@ -1,5 +1,5 @@
+# left in older checkouts by the Python command line
 __pycache__/
-*.pyc
 .venv/
 *.mp4
 *.mov

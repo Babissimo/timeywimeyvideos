@@ -5,7 +5,7 @@
 import { probe } from "./src/decode.ts";
 import { Live } from "./src/live.ts";
 import { fullSize, Problem, readOptions } from "./src/options.ts";
-import { handOver, render as renderClip } from "./src/render.ts";
+import { render as renderClip } from "./src/render.ts";
 import { changed, hasChanged, same, Sources, VIDEO_TYPES } from "./src/sources.ts";
 
 const $ = (id) => document.getElementById(id);
@@ -888,7 +888,6 @@ async function render(preview) {
   } catch (err) {
     if (err.name === "AbortError") showJob({ text: "Cancelled." });
     else if (await hasChanged(file)) showJob({ error: true, text: changed(file.name) });
-    else if (err.command) showJob({ error: true, text: handOver(err), command: err.command });
     else showJob({ error: true, text: err.message });
   } finally {
     job = null;
@@ -896,8 +895,8 @@ async function render(preview) {
 }
 
 // What the render panel shows: whether one is running, how far through (0 to 1),
-// what it says, and for a clip the browser can't render, timeslice.py's command.
-function showJob({ running = false, done = 0, text = "", error = false, command }) {
+// and what it says.
+function showJob({ running = false, done = 0, text = "", error = false }) {
   $("render-preview").disabled = running;
   $("render-full").disabled = running;
   $("job").hidden = false;
@@ -905,8 +904,6 @@ function showJob({ running = false, done = 0, text = "", error = false, command 
   $("job-bar").style.width = `${100 * done}%`;
   $("job-text").classList.toggle("error", error);
   $("job-text").textContent = text;
-  $("job-command").hidden = !command;
-  $("job-command").textContent = command || "";
 }
 
 $("render-preview").addEventListener("click", () => render(true));

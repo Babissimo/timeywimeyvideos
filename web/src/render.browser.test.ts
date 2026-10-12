@@ -3,16 +3,15 @@ import { server } from "vitest/browser";
 import raw from "../test/fixtures/render.json?raw";
 import { Problem } from "./options";
 import { framesOf, readBack, thumbnail } from "./readback";
-import { handOver, render, type Progress, type Rendered } from "./render";
-import { Unrenderable } from "./unrenderable";
+import { render, type Progress, type Rendered } from "./render";
 
-interface PyRender {
+interface Recorded {
   clip: string; values: Record<string, string>; preview: boolean; output: string;
   codec: string; width: number; height: number; frames: number; fps: [number, number];
   cols: number; rows: number; chosen: number[]; thumbnails: number[][];
 }
 
-const { renders } = JSON.parse(raw) as { renders: PyRender[] };
+const { renders } = JSON.parse(raw) as { renders: Recorded[] };
 const urls = import.meta.glob<string>("../test/fixtures/decode/*.{mp4,avi}",
                                      { query: "?url", import: "default", eager: true });
 
@@ -48,7 +47,7 @@ async function failure(promise: Promise<unknown>): Promise<unknown> {
 // and again as the render is read back.
 const MOST = server.browser === "firefox" ? 24 : 16;
 
-describe("renders what timeslice.py renders", () => {
+describe("renders as recorded", () => {
   for (const c of renders) {
     test(`${c.clip} ${JSON.stringify(c.values)}${c.preview ? " preview" : ""}`, async () => {
       const steps: Progress[] = [];
@@ -133,47 +132,35 @@ describe("render", () => {
   test("says when it can't read the file", async () => {
     const error = await failure(render(new File(["not a video"], "notes.mp4"), {}));
     expect(error).toEqual(new Problem("can't read a video stream from notes.mp4"));
-    expect(error).not.toBeInstanceOf(Unrenderable);
   });
 
-  test("offers timeslice.py's command for a file the browser can't open or decode", async () => {
+  test("says what to do with a file the browser can't open or decode", async () => {
     const avi = await failure(render(await clip("clip.avi"), {}));
-    expect(avi).toBeInstanceOf(Unrenderable);
-    expect(handOver(avi as Unrenderable))
-      .toBe("Can't read clip.avi: the browser can't open AVI files. timeslice.py can render it: "
-            + "run this beside it, with the video's path in place of its name.");
-    expect((avi as Unrenderable).command)
-      .toBe("uv run timeslice.py clip.avi clip_rotate_45deg.mp4 --angle=45 --slice=rotate");
+    expect(avi).toEqual(new Problem("The browser can't open AVI files such as clip.avi. Convert "
+                                    + "it to an H.264 MP4 first."));
     const mpeg4 = await failure(render(await clip("mpeg4.mp4"), {}, { preview: true }));
-    expect(mpeg4).toBeInstanceOf(Unrenderable);
-    expect((mpeg4 as Unrenderable).message)
-      .toMatch(/^Can't decode mpeg4\.mp4: the browser has no decoder for its \S+ video\.$/);
-    expect((mpeg4 as Unrenderable).command)
-      .toBe("uv run timeslice.py mpeg4.mp4 mpeg4_rotate_45deg_preview.mp4 --angle=45 "
-            + "--slice=rotate --preview");
+    expect(mpeg4).toBeInstanceOf(Problem);
+    expect((mpeg4 as Problem).message).toMatch(
+      /^The browser has no decoder for the \S+ video in mpeg4\.mp4\. Convert it to an H\.264 MP4 first\.$/);
   });
 
-  test("offers timeslice.py's command for a clip the GPU can't hold", async () => {
+  test("says how to make a clip the GPU can't hold fit", async () => {
     const gl = document.createElement("canvas").getContext("webgl2")!;
     const size = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
     gl.getExtension("WEBGL_lose_context")?.loseContext();
-    const file = new File([await clip("h264-30.mp4")], "my clip.mp4");
+    const file = await clip("h264-30.mp4");
 
     // At 90° a frame is as wide as the clip is long, so at a scale between size / 64 and
     // size / 48 only the clip, 64 × 48 before it, is too large.
     const scale = Math.round(size / 56);
     const wide = await failure(render(file, { angle: "90", scale: String(scale) }));
-    expect(wide).toBeInstanceOf(Unrenderable);
-    expect((wide as Unrenderable).message)
-      .toBe(`The GPU can hold frames at most ${size} pixels across, and this clip's are `
-            + `${64 * scale}×${48 * scale}.`);
-    expect((wide as Unrenderable).command)
-      .toBe(`uv run timeslice.py 'my clip.mp4' 'my clip_rotate_90deg_scale${scale}.mp4' `
-            + `--angle=90 --slice=rotate --scale=${scale}`);
+    expect(wide).toEqual(new Problem(`The GPU can hold frames at most ${size} pixels across, `
+                                     + `and this clip's are ${64 * scale}×${48 * scale}. `
+                                     + "Set a smaller scale."));
 
     const huge = await failure(render(file, { angle: "90", scale: String(size / 64) }));
-    expect(huge).toBeInstanceOf(Unrenderable);
-    expect((huge as Unrenderable).message).toMatch(
-      /^This clip needs \d+\.\d GB of GPU memory, more than the GPU can give it\.$/);
+    expect(huge).toBeInstanceOf(Problem);
+    expect((huge as Problem).message).toMatch(
+      /^This clip needs \d+\.\d GB of GPU memory, .*\. Set a shorter duration or a smaller scale\.$/);
   });
 });
