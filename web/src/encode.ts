@@ -1,6 +1,6 @@
 /**
- * Writing a render: frames drawn on a WebGL2 canvas, encoded as H.264 by WebCodecs and muxed
- * into an MP4 by Mediabunny.
+ * Writing a render: pictures in WebGL2 textures, encoded as H.264 by WebCodecs and muxed into
+ * an MP4 by Mediabunny.
  */
 import {
   EncodedPacket, EncodedVideoPacketSource, Mp4OutputFormat, Output, StreamTarget,
@@ -82,111 +82,97 @@ const COLOUR_SPACE: VideoColorSpaceInit = {
 const I420 = `#version 300 es
 precision highp float;
 precision highp int;
-uniform highp sampler2D picture;  // as drawn on the canvas, row 0 its bottom
-uniform int plane;                // 0 for Y, 1 for Cb, 2 for Cr
+uniform highp sampler2D picture;  // row 0 its top
+uniform ivec2 size;               // the frame's, the picture's rounded up to even
+uniform int across;               // the target's texels a row
 out vec4 levels;
 
 const vec3 KY = vec3(0.2126, 0.7152, 0.0722);
 
-// Pixel (x, y) of the picture, y from the top, padded with black to even sizes.
+// Pixel (x, y) of the picture, padded with black to the frame's size.
 vec3 pixel(int x, int y) {
-  ivec2 size = textureSize(picture, 0);
-  return x < size.x && y < size.y ? texelFetch(picture, ivec2(x, size.y - 1 - y), 0).rgb
-                                  : vec3(0.0);
+  ivec2 drawn = textureSize(picture, 0);
+  return x < drawn.x && y < drawn.y ? texelFetch(picture, ivec2(x, y), 0).rgb : vec3(0.0);
 }
 
-// The plane's level at (x, y): luma for each pixel, or chroma for each 2×2 block's mean.
-float level(int x, int y) {
-  if (plane == 0) return 16.0 + 219.0 * dot(pixel(x, y), KY);
-  vec3 rgb = (pixel(2 * x, 2 * y) + pixel(2 * x + 1, 2 * y) + pixel(2 * x, 2 * y + 1)
-              + pixel(2 * x + 1, 2 * y + 1)) / 4.0;
+// Byte i of the frame: Y, then Cb and Cr at half size each way, every row packed tight.
+float level(int i) {
+  int pixels = size.x * size.y, quarter = pixels / 4;
+  if (i < pixels) return 16.0 + 219.0 * dot(pixel(i % size.x, i / size.x), KY);
+  int plane = (i - pixels) / quarter, j = (i - pixels) % quarter;  // 0 for Cb, 1 for Cr
+  if (plane > 1) return 0.0;  // past the end
+  int x = 2 * (j % (size.x / 2)), y = 2 * (j / (size.x / 2));
+  vec3 rgb = (pixel(x, y) + pixel(x + 1, y) + pixel(x, y + 1) + pixel(x + 1, y + 1)) / 4.0;
   float luma = dot(rgb, KY);
-  float c = plane == 1 ? (rgb.b - luma) / (2.0 * (1.0 - KY.b))
+  float c = plane == 0 ? (rgb.b - luma) / (2.0 * (1.0 - KY.b))
                        : (rgb.r - luma) / (2.0 * (1.0 - KY.r));
   return 128.0 + 224.0 * c;
 }
 
-// Each texel packs four of the plane's levels in a row, and row r of the target is row r of
-// the plane, so the rows read back top first.
+// Texel (x, y) holds bytes 4n to 4n + 3 of the frame, n = y across + x, so the target reads
+// back as the frame.
 void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy);
-  vec4 four = vec4(level(4 * p.x, p.y), level(4 * p.x + 1, p.y), level(4 * p.x + 2, p.y),
-                   level(4 * p.x + 3, p.y));
+  int i = 4 * (int(gl_FragCoord.y) * across + int(gl_FragCoord.x));
+  vec4 four = vec4(level(i), level(i + 1), level(i + 2), level(i + 3));
   levels = clamp(floor(four + 0.5), 0.0, 255.0) / 255.0;
 }`;
 
 /**
- * Reads what a WebGL2 canvas shows as an I420 frame of even size, the picture in its top left
- * corner and black beyond it: Y, then Cb and Cr at half size each way, worked out on the GPU.
- * Each plane's rows are packed tight, as Firefox's VideoFrame reads them whatever stride a
- * layout gives.
+ * Turns a picture, an RGBA8 texture, into an I420 frame of even size, the picture in its top
+ * left corner and black beyond it: Y, then Cb and Cr at half size each way, worked out on the
+ * GPU into a target that reads back as the frame's bytes. Each plane's rows are packed tight,
+ * as Firefox's VideoFrame reads them whatever stride a layout gives.
  */
 class Planes {
+  /** The frame, once read. */
   readonly data: Uint8Array<ArrayBuffer>;
-  private readonly rows: Uint8Array<ArrayBuffer>;  // a plane as read, rows padded to whole texels
+  private readonly target: Uint8Array<ArrayBuffer>;  // the target's bytes, the frame's first
   private readonly gl: WebGL2RenderingContext;
-  private readonly picture: WebGLTexture;
   private readonly convert: Program;
   private readonly vao: WebGLVertexArrayObject;
-  private readonly targets: { texture: WebGLTexture; framebuffer: WebGLFramebuffer;
-                              texels: number; width: number; height: number;
-                              offset: number }[] = [];
+  private readonly texture: WebGLTexture;
+  private readonly framebuffer: WebGLFramebuffer;
+  private readonly across: number;  // the target's texels a row
+  private readonly down: number;    // and its rows
 
   constructor(gl: WebGL2RenderingContext, width: number, height: number) {
     this.gl = gl;
-    this.picture = dataTexture(gl);
-    // A subset of the canvas's channels, as copying from it requires.
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGB8, width, height);
-    this.convert = program(gl, COVER, I420, { picture: 0 }, ["plane"]);
+    const [w, h] = [even(width), even(height)];
+    // Two rows of the frame's luma a row of the target, and as many rows as hold 1.5 bytes a
+    // pixel.
+    this.across = w / 2;
+    this.down = Math.ceil(3 * h / 4);
+    this.convert = program(gl, COVER, I420, { picture: 0 }, ["size", "across"]);
+    gl.uniform2i(this.convert.uniforms.size, w, h);
+    gl.uniform1i(this.convert.uniforms.across, this.across);
     this.vao = gl.createVertexArray();
-    let offset = 0;
-    for (const [w, h] of [[even(width), even(height)], [even(width) / 2, even(height) / 2],
-                          [even(width) / 2, even(height) / 2]]) {
-      const texels = Math.ceil(w / 4);
-      const texture = dataTexture(gl);
-      fill(gl, texture, gl.RGBA8, texels, h, null);
-      this.targets.push({ texture, framebuffer: framebuffer(gl, texture), texels, width: w,
-                          height: h, offset });
-      offset += w * h;
-    }
-    this.data = new Uint8Array(offset);
-    this.rows = new Uint8Array(4 * this.targets[0].texels * this.targets[0].height);
+    this.texture = dataTexture(gl);
+    fill(gl, this.texture, gl.RGBA8, this.across, this.down, null);
+    this.framebuffer = framebuffer(gl, this.texture);
+    this.target = new Uint8Array(4 * this.across * this.down);
+    this.data = this.target.subarray(0, w * h * 3 / 2);
   }
 
-  /** Fill data with the planes of what the canvas shows now. Leaves the scissor test off. */
-  read(): void {
+  /** Fill data with the planes of a picture. */
+  read(picture: WebGLTexture): void {
     const { gl } = this;
-    const { width, height } = gl.canvas;
-    gl.disable(gl.SCISSOR_TEST);
-    bind(gl, 0, this.picture);
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
-    gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, width, height);
+    bind(gl, 0, picture);
     gl.useProgram(this.convert.program);
     gl.bindVertexArray(this.vao);
-    this.targets.forEach(({ framebuffer, texels, width, height, offset }, plane) => {
-      gl.uniform1i(this.convert.uniforms.plane, plane);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
-      gl.viewport(0, 0, texels, height);
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
-      const stride = 4 * texels;
-      gl.readPixels(0, 0, texels, height, gl.RGBA, gl.UNSIGNED_BYTE,
-                    this.rows.subarray(0, stride * height));
-      for (let y = 0; y < height; y++)
-        this.data.set(this.rows.subarray(stride * y, stride * y + width), offset + width * y);
-    });
-    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
+    gl.viewport(0, 0, this.across, this.down);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.readPixels(0, 0, this.across, this.down, gl.RGBA, gl.UNSIGNED_BYTE, this.target);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.bindVertexArray(null);
   }
 
   dispose(): void {
     const { gl } = this;
-    gl.deleteTexture(this.picture);
     gl.deleteProgram(this.convert.program);
     gl.deleteVertexArray(this.vao);
-    for (const { texture, framebuffer } of this.targets) {
-      gl.deleteTexture(texture);
-      gl.deleteFramebuffer(framebuffer);
-    }
+    gl.deleteTexture(this.texture);
+    gl.deleteFramebuffer(this.framebuffer);
   }
 }
 
@@ -254,10 +240,11 @@ async function choose(width: number, height: number, fps: Rate, settings: Settin
 const QUEUE = 3;
 
 /**
- * Encodes what a WebGL2 canvas shows, a frame at a time, into an MP4 at a constant frame rate.
- * The canvas keeps its size throughout. Frames go to the encoder as I420, so that the colour
- * matrix is the one the video is marked with: given RGB frames, Chrome's encoder doesn't always
- * use the one it marks. Each SPS is marked with it too, as some encoders leave it out.
+ * Encodes pictures, a frame at a time, into an MP4 at a constant frame rate. Each picture is an
+ * RGBA8 texture of the size the encoder was opened with, row 0 its top. Frames go to the
+ * encoder as I420, so that the colour matrix is the one the video is marked with: given RGB
+ * frames, Chrome's encoder doesn't always use the one it marks. Each SPS is marked with it too,
+ * as some encoders leave it out.
  */
 export class Encoder {
   readonly width: number;
@@ -284,7 +271,7 @@ export class Encoder {
     this.options = quantizer === null ? {} : { avc: { quantizer } } as VideoEncoderEncodeOptions;
     this.rateControl = quantizer === null
       ? `variable bitrate, ${formatBitrate(config.bitrate!)}` : `quantizer ${quantizer}`;
-    this.planes = new Planes(gl, gl.canvas.width, gl.canvas.height);
+    this.planes = new Planes(gl, config.width, config.height);
     this.output = new Output({
       format: new Mp4OutputFormat(),
       target: new StreamTarget(new WritableStream({ write: (chunk) => this.gathered.write(chunk) }),
@@ -300,22 +287,21 @@ export class Encoder {
   }
 
   /**
-   * An encoder for what the context's canvas shows, at `fps` frames a second. Throws
-   * Unencodable if the browser can't encode frames that size; add and finish throw it if the
-   * encoder fails later.
+   * An encoder for pictures width × height, at `fps` frames a second. Throws Unencodable if the
+   * browser can't encode frames that size; add and finish throw it if the encoder fails later.
    */
-  static async open(gl: WebGL2RenderingContext, fps: Rate, settings: Settings): Promise<Encoder> {
-    const { config, quantizer } = await choose(even(gl.canvas.width), even(gl.canvas.height), fps,
-                                               settings);
+  static async open(gl: WebGL2RenderingContext, width: number, height: number, fps: Rate,
+                    settings: Settings): Promise<Encoder> {
+    const { config, quantizer } = await choose(even(width), even(height), fps, settings);
     const encoder = new Encoder(gl, fps, config, quantizer);
     await encoder.output.start();
     return encoder;
   }
 
-  /** Encode what the canvas shows now as the next frame; resolves when there's room for more. */
-  async add(): Promise<void> {
+  /** Encode a picture as the next frame; resolves when there's room for more. */
+  async add(picture: WebGLTexture): Promise<void> {
     this.check();
-    this.planes.read();
+    this.planes.read(picture);
     const { num, den } = this.fps;
     const frame = new VideoFrame(this.planes.data, {
       format: "I420", codedWidth: this.width, codedHeight: this.height, colorSpace: COLOUR_SPACE,

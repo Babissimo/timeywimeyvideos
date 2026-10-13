@@ -7,13 +7,13 @@
  */
 import { load, planLoad, VideoError, type LoadOptions } from "./decode";
 import { Encoder, settings, Unencodable } from "./encode";
-import { Slicer, type SliceOptions } from "./gpu/slicer";
+import { Slicer } from "./gpu/slicer";
 import { Volume, VolumeTooLarge } from "./gpu/volume";
 import { looping } from "./noise";
 import {
   planFaded, Problem, readOptions, type OptionValues, type ProblemKind,
 } from "./options";
-import { PREVIEW_SCALE, type Line } from "./planner";
+import { PREVIEW_SCALE } from "./planner";
 import { gcd, limitDenominator } from "./numbers";
 import type { Rate } from "./types";
 
@@ -54,23 +54,12 @@ function times(a: Rate, b: Rate): Rate {
   return { num: num / divisor, den: den / divisor };
 }
 
-/**
- * A volume for the clip, frames × height × width, on the context of a canvas the size of an
- * output frame; or the Problem of a GPU that can't hold either.
- */
+/** A volume for the clip, frames × height × width, or the Problem of a GPU that can't hold it. */
 function allocate(gl: WebGL2RenderingContext, frames: number, height: number, width: number,
                   preview: boolean): Volume {
   if (gl.isContextLost()) throw new Problem(LOST);  // its limits would read as 0
   const layers = gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS) as number;
   const size = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
-  const { canvas } = gl;
-  // A canvas larger than the GPU can draw gets a smaller drawing buffer instead.
-  if (gl.drawingBufferWidth !== canvas.width || gl.drawingBufferHeight !== canvas.height
-      || canvas.width > size) {
-    throw new Problem(`The GPU can't make frames ${canvas.width}×${canvas.height}, as this `
-                      + "render's are. Set a smaller angle, a shorter duration or a smaller "
-                      + "scale.");
-  }
   if (frames > layers) {
     throw new Problem(`The GPU can hold at most ${layers} frames, and this clip has `
                       + `${frames}${preview ? " at half its frame rate" : ""}. Set a shorter `
@@ -87,18 +76,6 @@ function allocate(gl: WebGL2RenderingContext, frames: number, height: number, wi
     if (!(error instanceof VolumeTooLarge)) throw error;
     throw new Problem(`This clip needs ${(error.bytes / 1e9).toFixed(1)} GB of GPU memory, more `
                       + "than the GPU can give it. Set a shorter duration or a smaller scale.");
-  }
-}
-
-/** Slice a frame, or throw the Problem of one larger than the GPU can draw. */
-function slice(slicer: Slicer, volume: Volume, width: number, line: Line,
-               options: SliceOptions): void {
-  try {
-    slicer.slice(volume, width, line, options);
-  } catch (error) {
-    if (!(error instanceof RangeError)) throw error;
-    throw new Problem(`The GPU can't draw this render's frames: ${error.message}. Set a smaller `
-                      + "angle, a shorter duration or a smaller scale.");
   }
 }
 
@@ -119,7 +96,8 @@ async function run({ file, values, preview }: RenderRequest,
   // A preview has fewer frames, so it plays slower to last as long as the full render.
   const fps = opts.fps ? times(opts.fps, limitDenominator(shrink)) : planned.fps;
 
-  const canvas = new OffscreenCanvas(sweep.width, height);
+  // Frames are drawn into textures, never onto the canvas.
+  const canvas = new OffscreenCanvas(1, 1);
   const gl = canvas.getContext("webgl2", { alpha: false, antialias: false, depth: false,
                                            stencil: false });
   // No context: the browser has no WebGL2, or won't give any more to this page, as after the
@@ -127,9 +105,14 @@ async function run({ file, values, preview }: RenderRequest,
   if (!gl) throw new Problem("The browser won't give this render a WebGL2 context.");
   try {
     // Everything the GPU and encoder need is made before the clip is decoded.
-    const volume = allocate(gl, planned.frames, height, planned.width, preview);
     const slicer = new Slicer(gl);
-    const encoder = await Encoder.open(gl, fps, settings(sweep.width, height, fps, preview));
+    if (sweep.width > slicer.maxSize || height > slicer.maxSize) {
+      throw new Problem(`The GPU can't make frames ${sweep.width}×${height}, as this render's `
+                        + "are. Set a smaller angle, a shorter duration or a smaller scale.");
+    }
+    const volume = allocate(gl, planned.frames, height, planned.width, preview);
+    const encoder = await Encoder.open(gl, sweep.width, height, fps,
+                                       settings(sweep.width, height, fps, preview));
     await load(file, options, (i, frame) => {
       volume.upload(i, frame);
       frame.close();
@@ -140,10 +123,9 @@ async function run({ file, values, preview }: RenderRequest,
     const bend = surface && { surface, push: surface.push(sweep.normal) };
     const flat = { nearest: preview, wrap: sweep.loop, wrapX: sweep.sides, fade };
     for (let f = 0; f < sweep.frames; f++) {
-      slice(slicer, volume, sweep.width, sweep.at(f),
-            { ...flat, noise: bend ? { ...bend, f } : undefined });
-      slicer.draw();
-      await encoder.add();
+      slicer.slice(volume, sweep.width, sweep.at(f),
+                   { ...flat, noise: bend ? { ...bend, f } : undefined });
+      await encoder.add(slicer.texture);
       if (gl.isContextLost()) throw new Problem(LOST);
       progress("slicing", f + 1, sweep.frames);
     }
