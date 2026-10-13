@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "vitest";
 import { Noise } from "../noise";
 import { blockClip, type Clip, clips, crossfadeCases, readFrame, rgba, type SliceCase,
-         sliceCases, smoothClip, Tally, upload } from "./fixture";
+         sliceCases, smoothClip, Tally, upload } from "../../test/gpu";
 import { Slicer } from "./slicer";
 import { Volume } from "./volume";
 

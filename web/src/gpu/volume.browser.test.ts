@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, onTestFinished, test, vi } from "vitest";
 import { blockClip, type Clip, clips, crossfadeCases, readFrame, readLayer, rgba, Tally,
-         upload } from "./fixture";
+         upload } from "../../test/gpu";
 import { Volume, VolumeTooLarge } from "./volume";
 
 const gl = document.createElement("canvas").getContext("webgl2")!;

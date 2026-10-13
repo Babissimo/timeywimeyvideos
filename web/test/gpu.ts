@@ -2,9 +2,9 @@
  * The sampler fixture (web/test/fixtures/sampler.json) decoded, and helpers for the GPU
  * tests that check against it.
  */
-import raw from "../../test/fixtures/sampler.json?raw";
-import type { Columns, NoiseGrid } from "../types";
-import { Volume, type VolumeFormat } from "./volume";
+import raw from "./fixtures/sampler.json?raw";
+import type { Columns, NoiseGrid } from "../src/types";
+import { Volume, type VolumeFormat } from "../src/gpu/volume";
 
 /** A clip as numpy holds it: (t, y, x) voxels of 3 channels. */
 export interface Clip { frames: number; height: number; width: number; rgb: Uint8Array }
