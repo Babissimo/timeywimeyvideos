@@ -81,14 +81,14 @@ function options() {
   const noise = $("noise").checked;
   return {
     slice,
-    angle: $("angle").value || "0",
+    angle: sliceAngle(),
     inside: edges() === "inside" ? "1" : "",
     motion: moves() ? $("motion").value : "",
     loop: loop ? "1" : "",
     loop_fade: loop ? $("loop-fade").value : "",
     loop_sides: sides ? "1" : "",
     loop_side_fade: sides ? $("side-fade").value : "",
-    noise: noise ? $("noise-amount").value || "0" : "",
+    noise: noise ? noiseAmount() : "",
     noise_size: noise ? $("noise-size").value : "",
     noise_speed: noise ? $("noise-speed").value : "",
     noise_direction: noise ? $("noise-direction").value : "",
@@ -319,8 +319,7 @@ function slicesChanged() {
     input.min = -limit;
     input.max = limit;
   }
-  const angle = Number($("angle").value) || 0;
-  if (Math.abs(angle) > limit) setAngle(Math.sign(angle) * limit);
+  setAngle(sliceAngle());
   const loop = edges() === "loop", sides = loop && $("loop-sides").checked;
   $("edges-note").textContent = DESCRIBE[edges()];
   $("loop-fields").hidden = !loop;
@@ -351,15 +350,34 @@ for (const input of document.querySelectorAll(
   'input[name="slice"], input[name="edges"], #motion, #loop-sides')) {
   input.addEventListener("change", slicesChanged);
 }
-$("angle-range").addEventListener("input", () => {
-  $("angle").value = $("angle-range").value;
-  refresh();
-});
-$("angle").addEventListener("input", () => {
-  if ($("angle").value === "" || !$("angle").checkValidity()) return;
-  $("angle-range").value = $("angle").value;
-  refresh();
-});
+// A slider and the number box beside it, which set one value: the box's number, held within its
+// bounds. The slider shows the value to its own step, and the box shows it once left. While the
+// box holds no number, as while a minus sign is typed, the value stays as it was. Returns a
+// function that gives the value.
+function pair(slider, box, changed) {
+  let last = 0;
+  const value = () => {
+    if (box.value !== "") {  // it is "" while the box holds no number
+      const min = box.min === "" ? -Infinity : Number(box.min);
+      const max = box.max === "" ? Infinity : Number(box.max);
+      last = Math.min(Math.max(Number(box.value), min), max);
+    }
+    return last;
+  };
+  slider.addEventListener("input", () => {
+    box.value = slider.value;
+    changed();
+  });
+  box.addEventListener("input", () => {
+    if (box.value === "") return;
+    slider.value = String(value());
+    changed();
+  });
+  box.addEventListener("change", () => { box.value = String(value()); });
+  return value;
+}
+
+const sliceAngle = pair($("angle-range"), $("angle"), refresh);
 for (const id of ["start", "duration", "scale", "fps", "loop-fade", "side-fade"]) {
   $(id).addEventListener("change", refresh);
 }
@@ -371,7 +389,7 @@ function noiseChanged() {
   $("noise-note").textContent = DESCRIBE[`noise-${direction}`];
   $("cube-noise").hidden = !on;
   $("cube-noise").textContent = "With noise on, the real surface is bumpy: the frame " +
-    `is drawn on the flat plane its points are pushed off, up to ${$("noise-amount").value || 0} ` +
+    `is drawn on the flat plane its points are pushed off, up to ${noiseAmount()} ` +
     `frames ${direction === "time" ? "through time" : "perpendicular to it"}.`;
   refresh();
 }
@@ -379,15 +397,7 @@ function noiseChanged() {
 for (const id of ["noise", "noise-size", "noise-speed", "noise-direction", "noise-seed"]) {
   $(id).addEventListener("change", noiseChanged);
 }
-$("noise-range").addEventListener("input", () => {
-  $("noise-amount").value = $("noise-range").value;
-  noiseChanged();
-});
-$("noise-amount").addEventListener("input", () => {
-  if ($("noise-amount").value === "" || !$("noise-amount").checkValidity()) return;
-  $("noise-range").value = $("noise-amount").value;
-  noiseChanged();
-});
+const noiseAmount = pair($("noise-range"), $("noise-amount"), noiseChanged);
 
 // ---------------------------------------------------------------------------
 // Sources: videos opened on this computer, on their own or a folder at a time,
