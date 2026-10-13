@@ -8,7 +8,6 @@
 // starts and ends early and late enough to catch the bumps, and inside and loop frames keep far
 // enough from the edges that none leave the video.
 
-import { LruCache } from "./lru";
 import { decimal, gcd } from "./numbers";
 
 export const PREVIEW_SCALE = 0.5;  // a preview shrinks x, y and t by this factor
@@ -110,7 +109,6 @@ export const LOOP_WINDINGS = 16;    // most times across the width, or round tim
 /** How many times a loop goes across the width, and round time. */
 export type Windings = [across: number, roundT: number];
 
-const windingsCache = new LruCache<string, Windings>(64);  // the live view plans every frame
 const TOLERANCE = LOOP_TOLERANCE * Math.PI / 180;
 
 /**
@@ -119,9 +117,6 @@ const TOLERANCE = LOOP_TOLERANCE * Math.PI / 180;
  * LOOP_TOLERANCE degrees of it, or failing that the closest.
  */
 export function windings(width: number, nFrames: number, dx: number, dt: number): Windings {
-  const key = `${width},${nFrames},${dx},${dt}`;  // -0 and 0 share an entry
-  const cached = windingsCache.get(key);
-  if (cached) return [...cached];
   const aim = Math.atan2(dt, dx);
   let bestKey: [rank: number, cost: number] | null = null;
   let best: Windings = [0, 0];
@@ -139,8 +134,7 @@ export function windings(width: number, nFrames: number, dx: number, dt: number)
       }
     }
   }
-  windingsCache.set(key, best);
-  return [...best];
+  return best;
 }
 
 function pushedSideways(angle: number, pushX: number): string {
