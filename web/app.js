@@ -252,6 +252,7 @@ function estimate() {
 // frame is due and shows it, skipping any the live view can't keep up with.
 
 const clock = { start: 0, frame: 0 };
+let ticking = 0;  // the request for tick's next animation frame
 
 function anchor() {
   clock.start = performance.now();
@@ -268,7 +269,7 @@ function tick(now) {
       refresh();
     }
   }
-  requestAnimationFrame(tick);
+  ticking = requestAnimationFrame(tick);
 }
 
 function play() {
@@ -278,7 +279,8 @@ function play() {
   $("play").textContent = "❚❚";
   $("play").setAttribute("aria-label", "Pause");
   anchor();
-  requestAnimationFrame(tick);
+  cancelAnimationFrame(ticking);  // still due if paused and played again within a frame
+  ticking = requestAnimationFrame(tick);
 }
 
 function pause() {
