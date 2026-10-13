@@ -8,9 +8,13 @@
     "strict": true,
     "noEmit": true,
     "isolatedModules": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    // app.js is checked from its JSDoc, and imports web/src by file name.
+    "allowJs": true,
+    "checkJs": true,
+    "allowImportingTsExtensions": true
   },
-  // Browser code only; the other two configs check the tests.
-  "include": ["web/src"],
+  // Browser code only: web/src and the page's script. The other two configs check the tests.
+  "include": ["web/src", "web/app.js", "web/globals.d.ts"],
   "exclude": ["web/src/**/*.test.ts"]
 }
