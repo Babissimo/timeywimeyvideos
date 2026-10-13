@@ -268,8 +268,8 @@ any web server, such as `npx vite preview`. WebCodecs runs only in a secure
 context, so serve the page over HTTPS or open it at `localhost` or
 `127.0.0.1`; at any other plain `http://` address the page says it can't
 decode video. Browsers won't run its scripts from a file opened straight from
-disk. On every push to `main`, `.github/workflows/deploy-pages.yml` builds the
-page and publishes it on GitHub Pages.
+disk. On every push to `main`, `.github/workflows/deploy-pages.yml` runs the
+checks, builds the page and publishes it on GitHub Pages.
 
 `web/app.js` runs the page. The TypeScript in `web/src/` does the work:
 
@@ -285,8 +285,10 @@ page and publishes it on GitHub Pages.
 
 `npm test` runs the checks, some of them in both Google Chrome, which has
 to be installed, and Playwright's Firefox, which `npx playwright install firefox`
-installs; `npm run test:unit` runs only those that need no browser, as CI
-does. `npm run typecheck` checks the TypeScript. The expected values in
+installs; `npm run test:unit` runs only those that need no browser. On
+Linux, Firefox needs more to decode H.264 and draw with WebGL: run it as
+`.github/workflows/deploy-pages.yml` does. `npm run typecheck` checks the
+TypeScript. The expected values in
 `web/test/fixtures/` (the JSON files and `decode/frames.bin.gz`) were
 recorded from an earlier reference implementation, and nothing can make them
 afresh: when a change breaks a test that reads one, replace it with a test of

@@ -92,7 +92,8 @@ describe("probe", () => {
 // Cb's part in blue, not 2.112, puts the palette's colours some 10 levels out in blue.
 const WORST = server.browser === "firefox" || server.platform === "linux" ? 6 : 4;
 
-// Whether the browser decodes the HEVC clips' Main profile, as Playwright's Firefox doesn't.
+// Whether the browser decodes the HEVC clips' Main profile, as neither Playwright's Firefox nor
+// Chrome on Linux does.
 const hevc = (await VideoDecoder.isConfigSupported({ codec: "hvc1.1.6.L30.B0" })).supported;
 
 describe("planLoad and load match load_video", () => {
