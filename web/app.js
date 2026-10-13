@@ -154,8 +154,8 @@ async function pump() {
   const opts = options();
   // Once another source is chosen, the message is that one's to give.
   const chosen = state.chosen;
-  const loading = (text) => {
-    if (state.chosen === chosen) showMessage(text);
+  const loading = (text, progress = false) => {
+    if (state.chosen === chosen) showMessage(text, null, progress);
   };
   let slow = false;
   const timer = setTimeout(() => {
@@ -164,7 +164,7 @@ async function pump() {
   }, 300);
   try {
     const info = await liveView().show(file, opts, state.pos, (done, total) => {
-      if (slow) loading(`Loading the clip… ${Math.floor(100 * done / total)}%`);
+      if (slow) loading(`Loading the clip… ${Math.floor(100 * done / total)}%`, true);
     });
     const resized = !state.info || state.info.frames !== info.frames;
     state.info = info;
@@ -175,7 +175,7 @@ async function pump() {
     loadFace();
   } catch (err) {
     if (err.name === "AbortError") {  // another source or other options took over
-      if (slow) loading("Loading the clip…");  // as theirs loads, without this load's figure
+      if (slow) loading("Loading the clip…", true);  // as theirs loads, without this load's figure
     } else {
       pause();
       showMessage(err.message,
@@ -191,7 +191,10 @@ async function pump() {
   }
 }
 
-function showMessage(text, action) {
+// Show a message over the live view, with a button for a way out if there is one. A busy
+// message, such as how far a load has got, isn't read out at each change.
+function showMessage(text, action, busy = false) {
+  $("live-stage").setAttribute("aria-busy", String(busy));  // set before the text it governs
   $("live-message").hidden = false;
   $("live-text").textContent = text;
   const button = $("live-action");
@@ -204,6 +207,7 @@ function showMessage(text, action) {
 
 function hideMessage() {
   $("live-message").hidden = true;
+  $("live-stage").setAttribute("aria-busy", "false");
 }
 
 function describe() {
@@ -213,6 +217,15 @@ function describe() {
     `${info.width}×${info.height} · ${info.frames} frames · ${seconds(info.seconds)}`;
   $("frame-label").textContent = `${info.frame + 1} / ${info.frames}`;
   if (!state.scrubbing) $("scrub").value = Math.round(state.pos * 1000);
+  scrubText();
+}
+
+// What the scrubber says it is at, to assistive technology: a frame rather than 0 to 1000.
+function scrubText() {
+  const info = state.info;
+  if (!info) return $("scrub").removeAttribute("aria-valuetext");
+  const frame = Math.round(state.pos * (info.frames - 1)) + 1;
+  $("scrub").setAttribute("aria-valuetext", `Frame ${frame} of ${info.frames}`);
 }
 
 // What a full-quality render would make. It needs only the clip and the options, not the
@@ -288,6 +301,7 @@ $("play").addEventListener("click", () => (state.playing ? pause() : play()));
 $("scrub").addEventListener("pointerdown", () => { state.scrubbing = true; });
 $("scrub").addEventListener("input", () => {
   state.pos = $("scrub").value / 1000;
+  scrubText();
   refresh();
 });
 for (const done of ["pointerup", "pointercancel", "change"]) {
@@ -474,6 +488,7 @@ async function chooseSource(id) {
   $("source-info").textContent = "";
   $("live-info").textContent = "";
   $("frame-label").textContent = "";
+  scrubText();
   estimate();
   enableRender();
   if (!file) {
@@ -921,6 +936,7 @@ function showJob({ running = false, done = 0, text = "", error = false }) {
   $("job").hidden = false;
   $("cancel").hidden = !running;
   $("job-bar").style.width = `${100 * done}%`;
+  $("job-text").setAttribute("aria-busy", String(running));  // so only how it ends is read
   $("job-text").classList.toggle("error", error);
   $("job-text").textContent = text;
 }

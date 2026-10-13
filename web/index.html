@@ -24,8 +24,8 @@
         <span>Open a video, or drop one anywhere on the page</span>
       </label>
       <button id="open-folder" class="quiet" hidden>Open a folder of videos</button>
-      <p class="note" id="folder-note"></p>
-      <p class="note" id="source-info"></p>
+      <p class="note" id="folder-note" aria-live="polite"></p>
+      <p class="note" id="source-info" aria-live="polite"></p>
       <p class="note">Videos stay on this computer: nothing is uploaded.</p>
     </section>
 
@@ -129,7 +129,7 @@
       </div>
       <div id="job" hidden>
         <div class="bar"><div id="job-bar"></div></div>
-        <p class="note" id="job-text"></p>
+        <p class="note" id="job-text" aria-live="polite"></p>
         <button id="cancel" class="quiet">Cancel</button>
       </div>
     </section>
@@ -157,7 +157,7 @@
         <h2>Live preview</h2>
         <span class="note" id="live-info"></span>
       </div>
-      <div class="stage">
+      <div class="stage" id="live-stage" aria-live="polite">
         <canvas id="live"></canvas>
         <div class="overlay" id="live-message">
           <p id="live-text"></p>
@@ -193,7 +193,7 @@
     <section class="card wide">
       <div class="head">
         <h2>Renders</h2>
-        <span class="note" id="now-playing"></span>
+        <span class="note" id="now-playing" aria-live="polite"></span>
       </div>
       <video id="player" controls loop hidden></video>
       <ul id="renders"></ul>
