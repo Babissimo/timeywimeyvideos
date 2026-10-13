@@ -475,6 +475,7 @@ async function chooseSource(id) {
   $("live-info").textContent = "";
   $("frame-label").textContent = "";
   estimate();
+  enableRender();
   if (!file) {
     showMessage(UNABLE || NO_SOURCE);
     return;
@@ -887,6 +888,7 @@ async function render(preview) {
   const values = options();
   const controller = new AbortController();
   job = controller;
+  enableRender();
   const began = performance.now();
   const kind = preview ? "preview" : "full-quality render";
   showJob({ running: true, text: "Starting…" });
@@ -909,19 +911,25 @@ async function render(preview) {
     else showJob({ error: true, text: err.message });
   } finally {
     job = null;
+    enableRender();
   }
 }
 
 // What the render panel shows: whether one is running, how far through (0 to 1),
 // and what it says.
 function showJob({ running = false, done = 0, text = "", error = false }) {
-  $("render-preview").disabled = running;
-  $("render-full").disabled = running;
   $("job").hidden = false;
   $("cancel").hidden = !running;
   $("job-bar").style.width = `${100 * done}%`;
   $("job-text").classList.toggle("error", error);
   $("job-text").textContent = text;
+}
+
+// The render buttons work once a video is chosen, for one render at a time.
+function enableRender() {
+  const off = Boolean(job) || !state.source;
+  $("render-preview").disabled = off;
+  $("render-full").disabled = off;
 }
 
 $("render-preview").addEventListener("click", () => render(true));
@@ -1024,6 +1032,7 @@ function start() {
   noiseChanged();
   showRenders();
   showSources();
+  enableRender();  // as Firefox may keep a button's state from before a reload
   showMessage(UNABLE || NO_SOURCE);
 }
 
