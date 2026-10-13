@@ -109,6 +109,22 @@ describe("spsFrameRate", () => {
   });
 });
 
+/** A decoder configuration record of these parameter sets, and then `tail`. */
+function record(sps: Uint8Array[], pps: Uint8Array[], tail: Uint8Array): Uint8Array {
+  const sets = (nals: Uint8Array[]) => nals.flatMap((nal) => [0, nal.length, ...nal]);
+  return Uint8Array.from([1, 0x64, 0, 0x1f, 0xff, 0xe0 | sps.length, ...sets(sps), pps.length,
+                          ...sets(pps), ...tail]);
+}
+
+test("markColour mends a record whose parameter sets repeat their header byte", () => {
+  // As Firefox's encoder on Linux writes them.
+  const sps = hex(SPS.escaped), pps = hex("68ebe3cb22c0"), tail = hex("fdf8f800");
+  const doubled = (nal: Uint8Array) => Uint8Array.from([nal[0], ...nal]);
+  const marked = markColour(record([doubled(sps)], [doubled(pps)], tail), BT709);
+  expect(marked).toEqual(record([markSps(sps, BT709)], [pps], tail));
+  expect(spsColour(marked.subarray(8, 8 + marked[7]))).toEqual(BT709);
+});
+
 test("markColour marks each SPS of a decoder configuration record, and keeps the rest", () => {
   const pps = hex("28ef1f2c"), tail = hex("fdf8f800");
   const sps = hex(SPS.noColour);

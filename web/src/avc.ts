@@ -246,19 +246,31 @@ export function avcFrameRate(record: Uint8Array): Rate | null {
 
 /**
  * An AVCDecoderConfigurationRecord (an MP4's avcC box, a WebCodecs H.264 description) with
- * each SPS marked with this colour; the rest is as it was.
+ * each SPS marked with this colour; the rest is as it was. Firefox's encoder on Linux writes
+ * each parameter set's NAL header byte twice, which no SPS can start with, as no profile_idc is
+ * a header byte; such a record's parameter sets lose the second.
  */
 export function markColour(record: Uint8Array, colour: Colour): Uint8Array {
   const out: number[] = [...record.subarray(0, 5)];
   let at = 5;
   const sets = record[at++] & 0x1f;
-  out.push(0xe0 | sets);
-  for (let i = 0; i < sets; i++) {
+  const doubled = sets > 0 && record[8] === record[9];
+  // The parameter set at `at`, its length before it, without a repeated header byte.
+  const next = (): Uint8Array => {
     const length = (record[at] << 8) | record[at + 1];
-    const sps = markSps(record.subarray(at + 2, at + 2 + length), colour);
-    out.push(sps.length >> 8, sps.length & 0xff, ...sps);
+    const repeated = doubled && record[at + 2] === record[at + 3];
+    const nal = record.subarray(at + 2 + Number(repeated), at + 2 + length);
     at += 2 + length;
+    return nal;
+  };
+  const put = (nal: Uint8Array) => out.push(nal.length >> 8, nal.length & 0xff, ...nal);
+  out.push(0xe0 | sets);
+  for (let i = 0; i < sets; i++) put(markSps(next(), colour));
+  if (doubled) {
+    const pictures = record[at++];
+    out.push(pictures);
+    for (let i = 0; i < pictures; i++) put(next());
   }
-  out.push(...record.subarray(at));  // the picture parameter sets, and any extension
+  out.push(...record.subarray(at));  // the picture parameter sets as they were, and any extension
   return Uint8Array.from(out);
 }
