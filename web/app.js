@@ -499,7 +499,7 @@ async function chooseSource(id) {
 
 function watchOriginal() {
   original ??= URL.createObjectURL(state.source);
-  watch(original, state.source.name);
+  watch(original, state.source.name, state.source);
 }
 
 // Let go of the chosen file's address, and stop the player if it plays it.
@@ -1008,12 +1008,21 @@ function link(text, onclick) {
 }
 
 // Play a video in the player: the chosen file, or a render.
-function watch(url, label) {
-  const player = $("player");
+function watch(url, label, file = null) {
+  const player = $("player"), note = $("now-playing");
+  player.onerror = async () => {  // as for an original in a format only the page itself reads
+    const gone = file && await hasChanged(file);
+    if (player.src !== url) return;  // another video since
+    player.hidden = true;
+    note.textContent = gone ? changed(label) : `This browser's player can't play ${label}.`;
+    note.classList.add("error");
+    markPlaying();
+  };
   player.hidden = false;
   player.src = url;
   player.play().catch(() => { /* autoplay may be blocked; the controls still work */ });
-  $("now-playing").textContent = label;
+  note.textContent = label;
+  note.classList.remove("error");
   markPlaying();
 }
 
