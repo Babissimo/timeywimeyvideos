@@ -19,12 +19,63 @@ export type Entry =
   | { readonly kind: "directory"; readonly name: string }
   | { readonly kind: "file"; readonly name: string; getFile(): Promise<File> };
 
-/** A folder opened whole: a FileSystemDirectoryHandle, from `showDirectoryPicker`. */
+/**
+ * A folder opened whole: a FileSystemDirectoryHandle, picked with `showDirectoryPicker` or
+ * dropped, or where the browser gives no handle, an `entryFolder` or a `pickedFolder`. Those two
+ * can't tell where on disk they are, so they take any folder opened after them for another.
+ */
 export interface Folder {
   readonly kind: "directory";
   readonly name: string;
   values(): AsyncIterable<Entry>;
   isSameEntry(other: Folder): Promise<boolean>;
+}
+
+/** A folder dropped, from the entry `DataTransferItem.webkitGetAsEntry()` gives for it. */
+export function entryFolder(entry: FileSystemDirectoryEntry): Folder {
+  return {
+    kind: "directory",
+    name: entry.name,
+    async *values() {
+      const reader = entry.createReader();
+      for (;;) {  // a batch of entries at a time, until one comes empty
+        const batch = await new Promise<FileSystemEntry[]>(
+          (resolve, reject) => reader.readEntries(resolve, reject));
+        if (!batch.length) return;
+        for (const item of batch) {
+          if (!item.isFile) {
+            yield { kind: "directory", name: item.name };
+            continue;
+          }
+          const getFile = () => new Promise<File>(
+            (resolve, reject) => (item as FileSystemFileEntry).file(resolve, reject));
+          yield { kind: "file", name: item.name, getFile };
+        }
+      }
+    },
+    isSameEntry: async () => false,
+  };
+}
+
+/**
+ * A folder picked with `<input type="file" webkitdirectory>`, from the files the input gives:
+ * all of those under it, each with its path from the folder. Null for none, as for an empty
+ * folder, whose name the input doesn't give, and for files picked on their own, as by a browser
+ * that ignores webkitdirectory.
+ */
+export function pickedFolder(files: Iterable<File>): Folder | null {
+  const all = [...files];
+  if (!all[0]?.webkitRelativePath.includes("/")) return null;
+  const name = all[0].webkitRelativePath.split("/")[0];
+  const top = all.filter((file) => file.webkitRelativePath.split("/").length === 2);
+  return {
+    kind: "directory",
+    name,
+    async *values() {
+      for (const file of top) yield { kind: "file", name: file.name, getFile: async () => file };
+    },
+    isSameEntry: async () => false,
+  };
 }
 
 /** A folder's videos, and the names of those it listed but couldn't give. */
@@ -130,7 +181,8 @@ export class Sources {
    */
   async openFolder(folder: Folder): Promise<void> {
     const { files, unreadable } = await listFolder(folder);
-    const again = this.handle !== null && await this.handle.isSameEntry(folder);
+    const again = this.handle !== null  // a handle refuses to compare itself with a non-handle
+      && await this.handle.isSameEntry(folder).catch(() => false);
     const before = again ? this.inFolder : [];
     const chosen = this.inFolder.find((source) => source.id === this.chosenId);
     let opened = [...this.opened];

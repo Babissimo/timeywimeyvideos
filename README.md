@@ -61,9 +61,12 @@ Scale only resizes the frames and keeps every frame, so it changes the
 cuboid's shape: the same angle gives a different slice at a different scale.
 
 The page needs a browser with WebGL2 and WebCodecs, such as a recent Chrome
-or Edge, that can decode the clip's video and encode H.264. Opening a folder
-needs Chrome or Edge too; in other browsers, open or drop the videos
-themselves.
+or Edge, that can decode the clip's video and encode H.264. A folder opens in
+other browsers too, such as Firefox, with two differences. The page can't
+tell a folder opened again from another, so a video changed since it was
+chosen is listed afresh, beside the copy held. And picking a folder there
+lists everything under it before the page sees its top level, which takes a
+while for a large tree; dropping it doesn't.
 
 The GPU holds the clip as luma (brightness) at full size and colour at half
 size each way, 1.5 bytes for every pixel of every frame, in two pieces: the
