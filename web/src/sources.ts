@@ -145,6 +145,7 @@ export class Sources {
   /** The files opened on their own. Files of the same name from elsewhere are each offered. */
   opened: readonly Source[] = [];
   private handle: Folder | null = null;
+  private opening = 0;  // how many folders have been asked to open
   private made = 0;
   private chosenId = "";
 
@@ -178,11 +179,17 @@ export class Sources {
    * Opened again, the folder's videos keep their ids, matched by name. Any other video it lists
    * that is offered on its own, or was chosen from the folder before, joins it under its id.
    * Otherwise the video chosen from another folder stays offered, as opened on its own.
+   * Returns false, offering nothing, if another folder was asked to open while this one listed.
    */
-  async openFolder(folder: Folder): Promise<void> {
-    const { files, unreadable } = await listFolder(folder);
+  async openFolder(folder: Folder): Promise<boolean> {
+    const turn = ++this.opening;
+    const listing = await listFolder(folder).catch((error: unknown) => {
+      if (turn === this.opening) throw error;  // else another folder takes its place
+    });
     const again = this.handle !== null  // a handle refuses to compare itself with a non-handle
       && await this.handle.isSameEntry(folder).catch(() => false);
+    if (!listing || turn !== this.opening) return false;
+    const { files, unreadable } = listing;
     const before = again ? this.inFolder : [];
     const chosen = this.inFolder.find((source) => source.id === this.chosenId);
     let opened = [...this.opened];
@@ -200,6 +207,7 @@ export class Sources {
     this.folder = folder.name;
     this.inFolder = listed;
     this.unreadable = unreadable;
+    return true;
   }
 
   /** The source with this id, or null if none is offered. */

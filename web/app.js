@@ -558,7 +558,7 @@ async function pickFolder() {
 
 async function openFolder(folder) {
   try {
-    await sources.openFolder(folder);
+    if (!await sources.openFolder(folder)) return;  // another folder took its place
   } catch (err) {
     folderNote(`Couldn't read ${folder.name}: ${err.message}`, true);
     return;

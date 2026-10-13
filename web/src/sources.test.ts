@@ -284,6 +284,32 @@ describe("Sources", () => {
     expectFiles(sources.opened, [alone]);
   });
 
+  test("gives way to a folder asked to open while it lists", async () => {
+    const sources = new Sources();
+    let listed!: () => void;
+    const slow = folder("Large", [file("slow.mp4")]);
+    const waiting: Folder = { ...slow, async *values() {
+      await new Promise<void>((resolve) => { listed = resolve; });
+      yield* slow.values();
+    } };
+    const opening = sources.openFolder(waiting);
+    const quick = file("quick.mp4");
+    expect(await sources.openFolder(folder("Small", [quick]))).toBe(true);
+    listed();
+    expect(await opening).toBe(false);
+    expect(sources.folder).toBe("Small");
+    expectFiles(sources.inFolder, [quick]);
+
+    // Nor does it say why it couldn't be listed.
+    const failing = sources.openFolder({ ...waiting, async *values() {
+      await new Promise<void>((resolve) => { listed = resolve; });
+      throw new DOMException("gone", "NotFoundError");
+    } });
+    await sources.openFolder(folder("Small", [quick]));
+    listed();
+    expect(await failing).toBe(false);
+  });
+
   test("an empty folder still counts as open", async () => {
     const sources = new Sources();
     await sources.openFolder(folder("Empty", []));
