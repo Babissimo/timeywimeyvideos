@@ -136,8 +136,9 @@ describe("Encoder", () => {
       else expect(rateControl).toMatch(/^variable bitrate, (\d+ kbit|\d+\.\d Mbit)\/s$/);
       // Whichever encoder it was, the colours come back as they went in, give or take what
       // the decoder does where it makes RGB with libyuv's BT.709 table: its 2 for Cb's part in
-      // blue, not 2.112, puts these colours up to 9 levels out in blue. Firefox's decoders
-      // do so at any size and Chrome's on tiny frames, where neither browser takes a quantizer.
+      // blue, not 2.112, puts these colours up to 9 levels out in blue. Firefox's decoders, and
+      // Chrome's on Linux, do so at any size and Chrome's elsewhere on tiny frames, where
+      // neither browser takes a quantizer.
       expect((await readBack(video)).colour).toEqual(BT709);
       const frames = await framesOf(video, [0, 1, 2]);
       frames.forEach((frame, i) => {

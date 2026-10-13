@@ -42,10 +42,10 @@ async function failure(promise: Promise<unknown>): Promise<unknown> {
   return promise.then(() => expect.fail("the render was made"), (error: unknown) => error);
 }
 
-// Firefox's decoders make RGB with libyuv's BT.709 table, whose 2 for Cb's part in blue, not
-// 2.112, takes saturated colours' blue some 10 levels towards grey: once as the clip is loaded,
-// and again as the render is read back.
-const MOST = server.browser === "firefox" ? 24 : 16;
+// Firefox's decoders, and Chrome's on Linux, make RGB with libyuv's BT.709 table, whose 2 for
+// Cb's part in blue, not 2.112, takes saturated colours' blue some 10 levels towards grey: once
+// as the clip is loaded, and again as the render is read back.
+const MOST = server.browser === "firefox" || server.platform === "linux" ? 24 : 16;
 
 describe("renders as recorded", () => {
   for (const c of renders) {
