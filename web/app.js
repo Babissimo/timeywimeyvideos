@@ -297,7 +297,9 @@ for (const done of ["pointerup", "pointercancel", "change"]) {
 }
 
 document.addEventListener("keydown", (e) => {
-  if (e.target.closest("input, select, textarea") && e.target.type !== "range") return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;  // the browser's shortcuts, such as Back
+  // Fields take their own keys, and so does the player's video.
+  if (e.target.closest("input, select, textarea, video") && e.target.type !== "range") return;
   if (e.key === " " && e.target.tagName !== "BUTTON") {
     e.preventDefault();
     state.playing ? pause() : play();
