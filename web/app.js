@@ -101,9 +101,10 @@ function options() {
 }
 
 function seconds(s) {
-  if (s < 60) return `${s.toFixed(1)} s`;
-  const m = Math.floor(s / 60);
-  return `${m}:${String(Math.round(s - m * 60)).padStart(2, "0")}`;
+  const tenths = s.toFixed(1);
+  if (Number(tenths) < 60) return `${tenths} s`;
+  const whole = Math.round(s);  // rounded first, or 119.6 s would read 1:60
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
 }
 
 function bytes(n) {
