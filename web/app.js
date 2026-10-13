@@ -138,6 +138,7 @@ function liveView() {
 
 function refresh() {
   again = true;
+  live?.supersede(options());  // a load for other options would only hold up theirs
   pump();
   estimate();
 }
@@ -172,7 +173,9 @@ async function pump() {
     drawCube();
     loadFace();
   } catch (err) {
-    if (err.name !== "AbortError") {  // else another source took over
+    if (err.name === "AbortError") {  // another source or other options took over
+      if (slow) loading("Loading the clip…");  // as theirs loads, without this load's figure
+    } else {
       pause();
       showMessage(err.message,
         err.kind === "does_not_fit" ?

@@ -375,6 +375,22 @@ describe("Live", () => {
     live.dispose();
   });
 
+  test("stops a load that other options no longer want", async () => {
+    const { live } = make();
+    live.supersede({ scale: "0.5" });  // with no load under way
+    // Values that load the same clip, or that it can't read, leave the load be.
+    let showing = live.show(SOURCE, { angle: "30" }, 0);
+    live.supersede({ angle: "60", fps: "12" });
+    live.supersede({ fps: "fast" });
+    expect((await showing).volume).toEqual([20, 24, 32]);
+    live.unload();
+    showing = live.show(SOURCE, {}, 0);
+    live.supersede({ scale: "0.5" });
+    await expect(showing).rejects.toMatchObject({ name: "AbortError" });
+    expect((await live.show(SOURCE, { scale: "0.5" }, 0)).volume).toEqual([20, 12, 16]);
+    live.dispose();
+  });
+
   test("says the GPU is lost when it goes before the clip has room", async () => {
     const canvas = document.createElement("canvas");
     made.push(canvas);
