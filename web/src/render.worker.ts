@@ -1,9 +1,9 @@
 /**
- * Renders a clip in a worker of its own: decodes it onto the GPU, fades a loop's ends, slices
- * every frame of the sweep there and encodes it. A full render keeps the clip at the page's
- * scale and every frame, and blends neighbouring voxels; a preview halves it in x, y and time
- * and copies the nearest. The page ends the worker once it reports, or to cancel, and its GPU
- * memory and encoder go with it.
+ * Renders a clip in a worker of its own: decodes it onto the GPU, slices every frame of the
+ * sweep there, fading a loop's ends as it reads them, and encodes it. A full render keeps the
+ * clip at the page's scale and every frame, and blends neighbouring voxels; a preview halves
+ * it in x, y and time and copies the nearest. The page ends the worker once it reports, or to
+ * cancel, and its GPU memory and encoder go with it.
  */
 import { load, planLoad, VideoError, type LoadOptions } from "./decode";
 import { Encoder, settings, Unencodable } from "./encode";
@@ -11,11 +11,11 @@ import { Slicer, type SliceOptions } from "./gpu/slicer";
 import { Volume, VolumeTooLarge } from "./gpu/volume";
 import { looping } from "./noise";
 import {
-  loopFades, plan, Problem, readOptions, type OptionValues, type ProblemKind,
+  planFaded, Problem, readOptions, type OptionValues, type ProblemKind,
 } from "./options";
-import { PREVIEW_SCALE } from "./planner";
+import { PREVIEW_SCALE, type Line } from "./planner";
 import { gcd, limitDenominator } from "./numbers";
-import type { Columns, Rate } from "./types";
+import type { Rate } from "./types";
 
 /** What the page asks for: a render of a clip with the page's options. */
 export interface RenderRequest { file: Blob; values: OptionValues; preview: boolean }
@@ -82,7 +82,7 @@ function allocate(gl: WebGL2RenderingContext, frames: number, height: number, wi
                       + "scale.");
   }
   try {
-    return Volume.create(gl, frames, height, width, { format: "yuv420" });
+    return Volume.create(gl, frames, height, width);
   } catch (error) {
     if (!(error instanceof VolumeTooLarge)) throw error;
     throw new Problem(`This clip needs ${(error.bytes / 1e9).toFixed(1)} GB of GPU memory, more `
@@ -91,9 +91,10 @@ function allocate(gl: WebGL2RenderingContext, frames: number, height: number, wi
 }
 
 /** Slice a frame, or throw the Problem of one larger than the GPU can draw. */
-function slice(slicer: Slicer, volume: Volume, columns: Columns, options: SliceOptions): void {
+function slice(slicer: Slicer, volume: Volume, width: number, line: Line,
+               options: SliceOptions): void {
   try {
-    slicer.slice(volume, columns, options);
+    slicer.slice(volume, width, line, options);
   } catch (error) {
     if (!(error instanceof RangeError)) throw error;
     throw new Problem(`The GPU can't draw this render's frames: ${error.message}. Set a smaller `
@@ -111,10 +112,9 @@ async function run({ file, values, preview }: RenderRequest,
   };
   const planned = await planLoad(file, options);
   // Refuse what can't be done before decoding the clip.
-  const [fadeFrames, fadeColumns] = loopFades(planned.frames, planned.width,
-                                              planned.fps.num / planned.fps.den, opts, shrink);
   const noise = opts.noise && opts.noise.scaled(shrink);
-  const sweep = plan(planned.frames - fadeFrames, planned.width - fadeColumns, opts, noise);
+  const { fade, sweep } = planFaded(planned.frames, planned.width,
+                                    planned.fps.num / planned.fps.den, opts, noise, shrink);
   const { height } = planned;
   // A preview has fewer frames, so it plays slower to last as long as the full render.
   const fps = opts.fps ? times(opts.fps, limitDenominator(shrink)) : planned.fps;
@@ -135,16 +135,13 @@ async function run({ file, values, preview }: RenderRequest,
       frame.close();
       if (gl.isContextLost()) throw new Problem(LOST);
     }, (done, total) => progress("loading", done, total));
-    volume.crossfade(fadeFrames, 0);
-    volume.crossfade(fadeColumns, 2);
 
     const surface = noise && looping(noise, sweep);
-    const flat = { nearest: preview, wrap: sweep.loop, wrapX: sweep.sides };
+    const bend = surface && { surface, push: surface.push(sweep.normal) };
+    const flat = { nearest: preview, wrap: sweep.loop, wrapX: sweep.sides, fade };
     for (let f = 0; f < sweep.frames; f++) {
-      const columns = sweep.at(f);
-      slice(slicer, volume, columns, !surface ? flat : { ...flat, noise: {
-        push: surface.push(sweep.normal), grid: surface.grid(sweep.width, height, f),
-      } });
+      slice(slicer, volume, sweep.width, sweep.at(f),
+            { ...flat, noise: bend ? { ...bend, f } : undefined });
       slicer.draw();
       await encoder.add();
       if (gl.isContextLost()) throw new Problem(LOST);

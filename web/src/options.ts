@@ -182,10 +182,22 @@ export function loopFades(nFrames: number, width: number, rate: number, opts: Op
   return [frames, columns];
 }
 
+/**
+ * The loop's crossfades for a clip of nFrames at `rate` frames a second, `width` pixels wide
+ * once shrunk by `shrink`, and the sweep planned on what they leave of it, with `noise` scaled
+ * to match the clip.
+ */
+export function planFaded(nFrames: number, width: number, rate: number, opts: Options,
+                          noise: Noise | null, shrink = 1):
+    { fade: [number, number]; sweep: Sweep } {
+  const fade = loopFades(nFrames, width, rate, opts, shrink);
+  return { fade, sweep: plan(nFrames - fade[0], width - fade[1], opts, noise) };
+}
+
 /** Where output frame f's first and last columns come from: [t0, x0, t1, x1]. */
 export function endpoints(sweep: Sweep, f: number): [number, number, number, number] {
-  const { t, x } = sweep.at(f);
-  return [t[0], x[0], t[t.length - 1], x[x.length - 1]];
+  const { origin: [t, x], step: [dt, dx] } = sweep.at(f), last = sweep.width - 1;
+  return [t, x, t + last * dt, x + last * dx];
 }
 
 /**
@@ -202,8 +214,7 @@ export function fullSize(clip: ClipInfo, opts: Options): FullSize | { error: str
   const nFrames = Math.max(1, Math.round(seconds * rate));
   let sweep: Sweep;
   try {
-    const [frames, columns] = loopFades(nFrames, width, rate, opts);
-    sweep = plan(nFrames - frames, width - columns, opts, opts.noise);
+    ({ sweep } = planFaded(nFrames, width, rate, opts, opts.noise));
   } catch (error) {
     if (error instanceof Problem) return { error: error.message };
     throw error;

@@ -1,8 +1,8 @@
 // Slice planning. Each function returns a Sweep: the output frame width, the number of output
-// frames, at(f), which gives the (t, x) source position of every column of output frame f, the
-// (t, x) normal of the frame's plane, which perpendicular noise pushes along, and whether it
-// loops. A loop runs round time in a ring, so at(f) can lie past either end of the clip, and is
-// read with wrap. With sides, x wraps round too (wrapX).
+// frames, at(f), the line through the clip that output frame f reads, the (t, x) normal of the
+// frame's plane, which perpendicular noise pushes along, and whether it loops. A loop runs round
+// time in a ring, so at(f) can lie past either end of the clip, and is read with wrap. With
+// sides, x wraps round too (wrapX).
 //
 // Given noise, a plan allows for it pushing points as far as it can: the whole-plane sweep
 // starts and ends early and late enough to catch the bumps, and inside and loop frames keep far
@@ -10,7 +10,6 @@
 
 import { LruCache } from "./lru";
 import { decimal, gcd } from "./numbers";
-import type { Columns } from "./types";
 
 export const PREVIEW_SCALE = 0.5;  // a preview shrinks x, y and t by this factor
 
@@ -27,11 +26,14 @@ export class DoesNotFit extends OptionError {
 /** A direction or a move in the x-t plane, as (t, x). */
 export type TX = [number, number];
 
+/** Where an output frame reads the clip: column j reads (t, x) = origin + j step. */
+export interface Line { origin: TX; step: TX }
+
 export interface Sweep {
   width: number;
   frames: number;
-  /** The source position of every column of output frame f, in new arrays. */
-  at(f: number): Columns;
+  /** The line output frame f reads. */
+  at(f: number): Line;
   normal: TX;
   loop: boolean;
   sides: boolean;
@@ -271,15 +273,10 @@ export function rotationSweep(nFrames: number, width: number, angle: number,
   return {
     width: outWidth, frames: outFrames, normal, loop, sides,
     at(f) {
-      const step = f - (outFrames - 1) / 2;  // distance moved from the centre
-      const t0 = centreT + step * dt, x0 = centreX + step * dx;
-      const t = new Float64Array(outWidth), x = new Float64Array(outWidth);
-      for (let j = 0; j < outWidth; j++) {
-        const across = j - middle;  // position along the frame
-        t[j] = t0 + across * s;
-        x[j] = x0 + across * c;
-      }
-      return { t, x };
+      const moved = f - (outFrames - 1) / 2;  // distance moved from the centre
+      // The frame's middle column is at the centre, moved along (dt, dx).
+      return { origin: [centreT + moved * dt - middle * s, centreX + moved * dx - middle * c],
+               step: [s, c] };
     },
   };
 }
@@ -356,13 +353,8 @@ export function shearSweep(nFrames: number, width: number, angle: number,
   return {
     width, frames: outFrames, normal, loop, sides,
     at(f) {
-      const t0 = centreT + (f - (outFrames - 1) / 2);
-      const t = new Float64Array(width), x = new Float64Array(width);
-      for (let j = 0; j < width; j++) {
-        t[j] = t0 + (j - middle) * k;  // delayed k frames per pixel from the middle
-        x[j] = j;
-      }
-      return { t, x };
+      // Delayed k frames per pixel from the middle column, which moves a frame at a time.
+      return { origin: [centreT + (f - (outFrames - 1) / 2) - middle * k, 0], step: [k, 1] };
     },
   };
 }

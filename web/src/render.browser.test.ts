@@ -110,6 +110,26 @@ describe("render", () => {
     expect(sum / (a.length * 3 / 4)).toBeGreaterThan(2);
   });
 
+  test("fades a loop's ends and sides", async () => {
+    const file = await clip("h264-30.mp4");  // 40 frames 64 × 48, at 30 fps
+    const made = await render(file, { angle: "0", loop: "1", loop_sides: "1", loop_fade: "0.4",
+                                      loop_side_fade: "8" });
+    expect([made.width, made.height, made.frames]).toEqual([56, 48, 28]);
+    // Each of the clip's frames is a colour of its own, and at 0° each output frame is one of
+    // them, so the faded loop's first is mostly the frame its fade begins with, 12/13 of it.
+    const [start, end] = await framesOf(file, [0, 28]);
+    const [first] = await framesOf(made.video, [0]);
+    const off = (frame: Uint8ClampedArray) => {
+      let sum = 0;  // over the columns the side fade leaves alone
+      for (let y = 0; y < 48; y++)
+        for (let x = 8; x < 56; x++)
+          for (let k = 0; k < 3; k++)
+            sum += Math.abs(first[4 * (y * 56 + x) + k] - frame[4 * (y * 64 + x) + k]);
+      return sum / (48 * 48 * 3);
+    };
+    expect(off(end)).toBeLessThan(off(start) / 4);
+  });
+
   test("stops the worker when cancelled", async () => {
     const { start, ended } = watched();
     const controller = new AbortController();
