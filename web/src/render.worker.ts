@@ -6,7 +6,7 @@
  * cancel, and its GPU memory and encoder go with it.
  */
 import { load, planLoad, VideoError, type LoadOptions } from "./decode";
-import { Encoder, settings, Unencodable } from "./encode";
+import { Encoder, even, settings, Unencodable } from "./encode";
 import { Slicer } from "./gpu/slicer";
 import { Volume, VolumeTooLarge } from "./gpu/volume";
 import { looping } from "./noise";
@@ -93,6 +93,9 @@ async function run({ file, values, preview }: RenderRequest,
   const { fade, sweep } = planFaded(planned.frames, planned.width,
                                     planned.fps.num / planned.fps.den, opts, noise, shrink);
   const { height } = planned;
+  // H.264 frames are an even number of pixels wide, so an odd sweep's frames take one more
+  // column along their line, where the encoder would otherwise add a black one.
+  const width = even(sweep.width);
   // A preview has fewer frames, so it plays slower to last as long as the full render.
   const fps = opts.fps ? times(opts.fps, limitDenominator(shrink)) : planned.fps;
 
@@ -106,13 +109,13 @@ async function run({ file, values, preview }: RenderRequest,
   try {
     // Everything the GPU and encoder need is made before the clip is decoded.
     const slicer = new Slicer(gl);
-    if (sweep.width > slicer.maxSize || height > slicer.maxSize) {
-      throw new Problem(`The GPU can't make frames ${sweep.width}×${height}, as this render's `
+    if (width > slicer.maxSize || height > slicer.maxSize) {
+      throw new Problem(`The GPU can't make frames ${width}×${height}, as this render's `
                         + "are. Set a smaller angle, a shorter duration or a smaller scale.");
     }
     const volume = allocate(gl, planned.frames, height, planned.width, preview);
-    const encoder = await Encoder.open(gl, sweep.width, height, fps,
-                                       settings(sweep.width, height, fps, preview));
+    const encoder = await Encoder.open(gl, width, height, fps,
+                                       settings(width, height, fps, preview));
     await load(file, options, (i, frame) => {
       volume.upload(i, frame);
       frame.close();
@@ -123,7 +126,7 @@ async function run({ file, values, preview }: RenderRequest,
     const bend = surface && { surface, push: surface.push(sweep.normal) };
     const flat = { nearest: preview, wrap: sweep.loop, wrapX: sweep.sides, fade };
     for (let f = 0; f < sweep.frames; f++) {
-      slicer.slice(volume, sweep.width, sweep.at(f),
+      slicer.slice(volume, width, sweep.at(f),
                    { ...flat, noise: bend ? { ...bend, f } : undefined });
       await encoder.add(slicer.texture);
       if (gl.isContextLost()) throw new Problem(LOST);
@@ -133,8 +136,9 @@ async function run({ file, values, preview }: RenderRequest,
     slicer.dispose();
     volume.dispose();
     progress("finishing", sweep.frames, sweep.frames);
-    const { video, width, height: codedHeight, rateControl } = await encoder.finish();
-    return { video, width, height: codedHeight, frames: sweep.frames, fps, rateControl };
+    const { video, width: codedWidth, height: codedHeight, rateControl } = await encoder.finish();
+    return { video, width: codedWidth, height: codedHeight, frames: sweep.frames, fps,
+             rateControl };
   } catch (error) {
     // A lost context shows first as whatever fails, such as a shader that won't compile.
     if (gl.isContextLost() && !(error instanceof Problem)) throw new Problem(LOST);
