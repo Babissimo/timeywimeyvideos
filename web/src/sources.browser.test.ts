@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "vitest";
 import { commands, server, userEvent } from "vitest/browser";
-import { changed, hasChanged, listFolder, Sources } from "./sources";
+import { changed, hasChanged, listFolder, pickedFolder, Sources } from "./sources";
 
 // The origin's private file system gives real FileSystemDirectoryHandles without asking.
 const root = () => navigator.storage.getDirectory();
@@ -41,6 +41,31 @@ test("lists the videos in a real folder", async () => {
   await sources.openFolder(more);
   expect(sources.inFolder[0].id).not.toBe(run.id);
   expect(sources.chosen).toEqual(run);
+});
+
+test("lists the videos in a folder picked with webkitdirectory", async () => {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.webkitdirectory = true;
+  document.body.append(input);
+  try {
+    // The input gives every file under the folder, in no set order.
+    await userEvent.upload(input, "web/test/fixtures/folder");
+    const folder = pickedFolder(input.files!)!;
+    expect(folder.name).toBe("folder");
+    const { files } = await listFolder(folder);
+    expect(files.map((file) => file.name)).toEqual(["clip2.mp4", "clip10.M4V"]);
+    expect(await files[1].text()).toBe("clip10");
+
+    const sources = new Sources();
+    await sources.openFolder(folder);
+    const clip = sources.choose(sources.inFolder[0].id)!;
+    await userEvent.upload(input, "web/test/fixtures/folder");
+    await sources.openFolder(pickedFolder(input.files!)!);
+    expect(sources.chosen?.id).toBe(clip.id);  // picked again, the video chosen stays so
+  } finally {
+    input.remove();
+  }
 });
 
 test("tells when a file has changed since it was opened", async () => {

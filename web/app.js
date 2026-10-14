@@ -7,7 +7,9 @@ import { Live } from "./src/live.ts";
 import { MAX_SEED } from "./src/noise.ts";
 import { fullSize, Problem, readOptions } from "./src/options.ts";
 import { render as renderClip } from "./src/render.ts";
-import { changed, hasChanged, same, Sources, VIDEO_TYPES } from "./src/sources.ts";
+import {
+  changed, entryFolder, hasChanged, pickedFolder, same, Sources, VIDEO_TYPES,
+} from "./src/sources.ts";
 
 const $ = (id) => document.getElementById(id);
 
@@ -542,6 +544,8 @@ function openFiles(files) {
 }
 
 async function pickFolder() {
+  // Firefox and Safari have no showDirectoryPicker, but take a folder in a file input.
+  if (!("showDirectoryPicker" in window)) return $("folder").click();
   let folder;
   try {
     folder = await window.showDirectoryPicker({ id: "videos", startIn: "videos" });
@@ -554,14 +558,15 @@ async function pickFolder() {
 
 async function openFolder(folder) {
   try {
-    await sources.openFolder(folder);
+    if (!await sources.openFolder(folder)) return;  // another folder took its place
   } catch (err) {
     folderNote(`Couldn't read ${folder.name}: ${err.message}`, true);
     return;
   }
   showSources();
   describeFolder();
-  // The video chosen stays, but comes afresh if the folder opened again holds a newer copy.
+  // The video chosen stays, as the File just listed where the folder lists it again, and comes
+  // afresh if that is a newer copy.
   const chosen = sources.chosen;
   if (chosen && chosen.file !== state.source) chooseSource(chosen.id);
 }
@@ -573,8 +578,17 @@ $("file").addEventListener("change", () => {
   openFiles([...$("file").files]);
   $("file").value = "";
 });
-$("open-folder").hidden = !("showDirectoryPicker" in window);
+$("open-folder").hidden =
+  !("showDirectoryPicker" in window || "webkitdirectory" in HTMLInputElement.prototype);
 $("open-folder").addEventListener("click", pickFolder);
+$("folder").addEventListener("change", () => {
+  const files = [...$("folder").files];
+  $("folder").value = "";
+  const folder = pickedFolder(files);
+  if (folder) openFolder(folder);
+  else if (files.length) openFiles(files);  // from a browser that picked files, not a folder
+  else folderNote("The folder chosen holds no files.");
+});
 document.addEventListener("dragover", (e) => {
   e.preventDefault();
   $("drop").classList.add("over");
@@ -587,23 +601,13 @@ document.addEventListener("drop", async (e) => {
   $("drop").classList.remove("over");
   // Everything is taken from the items before the first await: they empty once the event ends.
   const items = [...e.dataTransfer.items].filter((item) => item.kind === "file");
-  const folders = items.map((item) => item.webkitGetAsEntry?.()?.isDirectory ?? false);
-  const files = items.filter((_, i) => !folders[i]).map((item) => item.getAsFile());
-  // The first folder opens as the folder, where the browser gives its handle.
-  const dropped = items.find((_, i) => folders[i]);
-  const handle = dropped?.getAsFileSystemHandle?.();
+  const entries = items.map((item) => item.webkitGetAsEntry?.() ?? null);
+  const files = items.filter((_, i) => !entries[i]?.isDirectory).map((item) => item.getAsFile());
+  // The first folder opens as the folder: by its handle where the browser gives one.
+  const i = entries.findIndex((entry) => entry?.isDirectory);
+  const handle = i < 0 ? null : items[i].getAsFileSystemHandle?.().catch(() => null);
   openFiles(files.filter(Boolean));
-  if (!dropped) return;
-  if (!handle) {
-    folderNote("This browser can't open a dropped folder: " + ("showDirectoryPicker" in window ?
-      "use Open a folder of videos instead." : "open or drop the videos in it instead."));
-    return;
-  }
-  try {
-    await openFolder(await handle);
-  } catch (err) {
-    folderNote(err.message, true);
-  }
+  if (i >= 0) openFolder((await handle) ?? entryFolder(entries[i]));
 });
 
 // ---------------------------------------------------------------------------

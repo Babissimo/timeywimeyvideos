@@ -1,5 +1,7 @@
 import { describe, expect, test } from "vitest";
-import { isVideo, listFolder, Sources, VIDEO_TYPES, type Folder, type Source } from "./sources";
+import {
+  entryFolder, isVideo, listFolder, pickedFolder, Sources, VIDEO_TYPES, type Folder, type Source,
+} from "./sources";
 
 /** An entry that lists but can't be read, as a file removed since the folder was opened. */
 class Gone {
@@ -97,6 +99,121 @@ describe("listFolder", () => {
   });
 });
 
+/** A File as an input with webkitdirectory gives it, with its path from the folder picked. */
+function picked(path: string, text = path, lastModified = 0): File {
+  const made = file(path.slice(path.lastIndexOf("/") + 1), text, lastModified);
+  Object.defineProperty(made, "webkitRelativePath", { value: path });
+  return made;
+}
+
+/**
+ * A folder's entry as a drop gives it: files, ones that can't be read, and folders (named by a
+ * string), which its reader gives `batch` at a time, as browsers give a large folder's.
+ */
+function entry(name: string, entries: (File | Gone | string)[], batch = 2,
+               unreadable = false): FileSystemDirectoryEntry {
+  const later = (call: () => void) => setTimeout(call);
+  const item = (each: File | Gone | string) => typeof each === "string"
+    ? { isFile: false, isDirectory: true, name: each }
+    : { isFile: true, isDirectory: false, name: each.name,
+        file(resolve: (file: File) => void, reject: (error: DOMException) => void) {
+          later(() => (each instanceof Gone ? reject(new DOMException("gone", "NotFoundError"))
+                                            : resolve(each)));
+        } };
+  const folder = {
+    isFile: false, isDirectory: true, name,
+    createReader() {
+      let at = 0;
+      return {
+        readEntries(resolve: (entries: unknown[]) => void,
+                    reject: (error: DOMException) => void) {
+          if (unreadable) return later(() => reject(new DOMException("locked", "NotReadableError")));
+          const next = entries.slice(at, at + batch).map(item);
+          at += batch;
+          later(() => resolve(next));
+        },
+      };
+    },
+  };
+  return folder as unknown as FileSystemDirectoryEntry;
+}
+
+describe("entryFolder", () => {
+  test("lists a dropped folder's videos, however many entries its reader gives at once", async () => {
+    const files = [file("b.mov"), file("notes.txt"), file("clip10.mp4"), file("clip2.mp4"),
+                   file("A.webm")];
+    for (const batch of [1, 2, 100]) {
+      const folder = entryFolder(entry("Movies", [...files, "clips.mp4", new Gone("lost.mp4")],
+                                       batch));
+      expect(folder.name).toBe("Movies");
+      const { files: listed, unreadable } = await listFolder(folder);
+      expectFiles(listed, [files[4], files[0], files[3], files[2]]);
+      expect(unreadable).toEqual(["lost.mp4"]);
+    }
+  });
+
+  test("says why a folder can't be read", async () => {
+    const folder = entryFolder(entry("Locked", [file("clip.mp4")], 2, true));
+    await expect(listFolder(folder)).rejects.toThrow("locked");
+  });
+
+  test("takes any folder opened after it for another, as it can't tell", async () => {
+    const movies = entryFolder(entry("Movies", []));
+    expect(await movies.isSameEntry(entryFolder(entry("Movies", [])))).toBe(false);
+    expect(await movies.isSameEntry(movies)).toBe(false);
+  });
+});
+
+describe("pickedFolder", () => {
+  test("lists the videos at the top level of the folder picked", async () => {
+    const clip = picked("Movies/clip.mp4"), walk = picked("Movies/walk.MOV");
+    const folder = pickedFolder([picked("Movies/inner/deep.mp4"), walk, picked("Movies/notes.txt"),
+                                 clip, picked("Movies/.hidden.mp4")])!;
+    expect(folder.name).toBe("Movies");
+    const { files, unreadable } = await listFolder(folder);
+    expectFiles(files, [clip, walk]);
+    expect(unreadable).toEqual([]);
+    expect((await listFolder(pickedFolder([picked("Movies/inner/deep.mp4")])!)).files)
+      .toEqual([]);
+  });
+
+  test("is no folder for no files, or for files picked on their own", () => {
+    expect(pickedFolder([])).toBeNull();
+    const alone = file("clip.mp4");
+    Object.defineProperty(alone, "webkitRelativePath", { value: "" });
+    expect(pickedFolder([alone])).toBeNull();
+  });
+
+  test("picked again, keeps the video chosen while it is unchanged", async () => {
+    const sources = new Sources();
+    const walk = picked("Movies/walk.mp4", "walk", 1);
+    await sources.openFolder(pickedFolder([walk, picked("Movies/run.mp4")])!);
+    const id = sources.inFolder.find((s) => s.file === walk)!.id;
+    sources.choose(id);
+    const again = picked("Movies/walk.mp4", "walk", 1);
+    await sources.openFolder(pickedFolder([picked("Movies/run.mp4"), again])!);
+    expectSource(sources.chosen, id, again);
+    expect(sources.opened).toEqual([]);
+    // Changed since, it may be another folder's video of the same name, so it is listed afresh
+    // and the one chosen stays offered on its own.
+    const edited = picked("Movies/walk.mp4", "walk, edited", 2);
+    await sources.openFolder(pickedFolder([edited])!);
+    expectFiles(sources.inFolder, [edited]);
+    expect(sources.inFolder[0].id).not.toBe(id);
+    expectSource(sources.chosen, id, again);
+    expectFiles(sources.opened, [again]);
+  });
+
+  test("opens after a handle, which can't compare itself with it", async () => {
+    const sources = new Sources();
+    await sources.openFolder({ ...folder("Movies", [file("walk.mp4")]),
+                               isSameEntry: () => Promise.reject(new TypeError("not a handle")) });
+    const walk = picked("Movies/walk.mp4");
+    await sources.openFolder(pickedFolder([walk])!);
+    expectFiles(sources.inFolder, [walk]);
+  });
+});
+
 describe("Sources", () => {
   test("keeps the Files opened, in order of name, and offers each by an id of its own", () => {
     const sources = new Sources();
@@ -165,6 +282,32 @@ describe("Sources", () => {
     expect(sources.unreadable).toEqual([]);
     expect(sources.get(id)).toBeNull();
     expectFiles(sources.opened, [alone]);
+  });
+
+  test("gives way to a folder asked to open while it lists", async () => {
+    const sources = new Sources();
+    let listed!: () => void;
+    const slow = folder("Large", [file("slow.mp4")]);
+    const waiting: Folder = { ...slow, async *values() {
+      await new Promise<void>((resolve) => { listed = resolve; });
+      yield* slow.values();
+    } };
+    const opening = sources.openFolder(waiting);
+    const quick = file("quick.mp4");
+    expect(await sources.openFolder(folder("Small", [quick]))).toBe(true);
+    listed();
+    expect(await opening).toBe(false);
+    expect(sources.folder).toBe("Small");
+    expectFiles(sources.inFolder, [quick]);
+
+    // Nor does it say why it couldn't be listed.
+    const failing = sources.openFolder({ ...waiting, async *values() {
+      await new Promise<void>((resolve) => { listed = resolve; });
+      throw new DOMException("gone", "NotFoundError");
+    } });
+    await sources.openFolder(folder("Small", [quick]));
+    listed();
+    expect(await failing).toBe(false);
   });
 
   test("an empty folder still counts as open", async () => {
