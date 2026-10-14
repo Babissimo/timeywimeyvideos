@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { server } from "vitest/browser";
 import { codecString, Encoder, settings, Unencodable } from "./encode";
+import { dataTexture, fill } from "./gpu/gl";
 import { framesOf, readBack } from "./readback";
 import type { Rate } from "./types";
 
@@ -8,26 +9,29 @@ import type { Rate } from "./types";
 const COLOURS = [[200, 40, 40], [40, 200, 40], [40, 40, 200], [200, 200, 40], [40, 200, 200],
                  [200, 40, 200], [220, 220, 220], [60, 60, 60]];
 
-/** A WebGL2 canvas this size. */
-function canvas(width: number, height: number): WebGL2RenderingContext {
-  return new OffscreenCanvas(width, height).getContext("webgl2", { alpha: false })!;
+const context = () => new OffscreenCanvas(1, 1).getContext("webgl2")!;
+
+/** A picture to encode, width × height, pixel (x, y) colour(x, y), row 0 its top. */
+function picture(gl: WebGL2RenderingContext, width: number, height: number,
+                 colour: (x: number, y: number) => number[]): WebGLTexture {
+  const pixels = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y++)
+    for (let x = 0; x < width; x++) pixels.set([...colour(x, y), 255], 4 * (y * width + x));
+  const texture = dataTexture(gl);
+  fill(gl, texture, gl.RGBA8, width, height, pixels);
+  return texture;
 }
 
-/** Encode n frames of a canvas this size, each one colour over all but its bottom right. */
+/** Encode n pictures this size, each one colour over all but its bottom right quarter. */
 async function encode(width: number, height: number, fps: Rate, n: number,
                       preview = false) {
-  const gl = canvas(width, height);
-  const encoder = await Encoder.open(gl, fps, settings(width, height, fps, preview));
+  const gl = context();
+  const encoder = await Encoder.open(gl, width, height, fps,
+                                     settings(width, height, fps, preview));
   for (let i = 0; i < n; i++) {
-    const [r, g, b] = COLOURS[i % COLOURS.length];
-    gl.disable(gl.SCISSOR_TEST);
-    gl.clearColor(r / 255, g / 255, b / 255, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.enable(gl.SCISSOR_TEST);  // the bottom right quarter, as the canvas's y runs up
-    gl.scissor(width >> 1, 0, width - (width >> 1), height - (height >> 1));
-    gl.clearColor(1, 1, 1, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    await encoder.add();
+    const colour = COLOURS[i % COLOURS.length];
+    await encoder.add(picture(gl, width, height, (x, y) =>
+      x >= width >> 1 && y >= height >> 1 ? [255, 255, 255] : colour));
   }
   return encoder.finish();
 }
@@ -86,15 +90,12 @@ describe("Encoder", () => {
     });
     const [width, height] = [30, 16];  // planes 30 and 15 wide, neither whole RGBA texels
     const fps = { num: 30, den: 1 };
-    const gl = canvas(width, height);
-    const encoder = await Encoder.open(gl, fps, settings(width, height, fps, false));
-    gl.clearColor(0, 0, 0, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.enable(gl.SCISSOR_TEST);  // a magenta bar down columns 8 to 11
-    gl.scissor(8, 0, 4, height);
-    gl.clearColor(1, 0, 1, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    await encoder.add();
+    const gl = context();
+    const encoder = await Encoder.open(gl, width, height, fps,
+                                       settings(width, height, fps, false));
+    // A magenta bar down columns 8 to 11.
+    await encoder.add(picture(gl, width, height,
+                              (x) => x >= 8 && x < 12 ? [255, 0, 255] : [0, 0, 0]));
     await encoder.finish();
 
     const [data] = handed;
@@ -159,25 +160,27 @@ describe("Encoder", () => {
 
   test("refuses frames the browser can't encode", async () => {
     const fps = { num: 30, den: 1 };
-    await expect(Encoder.open(canvas(30000, 16), fps, settings(30000, 16, fps, false)))
+    await expect(Encoder.open(context(), 30000, 16, fps, settings(30000, 16, fps, false)))
       .rejects.toThrow(new Unencodable("The browser can't encode video 30000×16."));
   });
 
   test("says when the browser can't encode H.264 at all", async () => {
     vi.spyOn(VideoEncoder, "isConfigSupported").mockResolvedValue({ supported: false });
     const fps = { num: 30, den: 1 };
-    await expect(Encoder.open(canvas(64, 48), fps, settings(64, 48, fps, false)))
+    await expect(Encoder.open(context(), 64, 48, fps, settings(64, 48, fps, false)))
       .rejects.toThrow(new Unencodable("The browser can't encode H.264 video."));
   });
 
   test("says when the encoder fails partway", async () => {
     const fps = { num: 30, den: 1 };
-    const encoder = await Encoder.open(canvas(64, 48), fps, settings(64, 48, fps, false));
-    await encoder.add();
+    const gl = context();
+    const encoder = await Encoder.open(gl, 64, 48, fps, settings(64, 48, fps, false));
+    const grey = picture(gl, 64, 48, () => [128, 128, 128]);
+    await encoder.add(grey);
     vi.spyOn(VideoEncoder.prototype, "encode").mockImplementation(() => {
       throw new DOMException("Encoding error.", "EncodingError");
     });
-    const error = await encoder.add().then(() => null, (error: unknown) => error);
+    const error = await encoder.add(grey).then(() => null, (error: unknown) => error);
     expect(error).toEqual(new Unencodable("The browser's encoder failed: Encoding error."));
     await expect(encoder.finish()).rejects.toBe(error);
   });
