@@ -2,7 +2,7 @@ import { afterAll, afterEach, describe, expect, test, vi } from "vitest";
 import raw from "../test/fixtures/live.json?raw";
 import h264 from "../test/fixtures/decode/h264-30.mp4?url";
 import rot90 from "../test/fixtures/decode/h264-rot90.mp4?url";
-import { NOISY } from "./gpu/shaders";
+import { SLICE } from "./gpu/shaders";
 import { Volume, VolumeTooLarge } from "./gpu/volume";
 import { Live, type FrameInfo } from "./live";
 import { Noise } from "./noise";
@@ -160,6 +160,26 @@ describe("Live", () => {
     live.dispose();
   });
 
+  test("changes the fades without loading the clip again", async () => {
+    const { live, canvas } = make();
+    const progress = vi.fn();
+    const values = { angle: "30", loop: "1", loop_sides: "1" };
+    const plain = await live.show(SOURCE, values, 0.5, progress);
+    expect(progress).toHaveBeenCalledTimes(20);
+    const unfaded = drawn(canvas);
+    progress.mockClear();
+    const faded = await live.show(SOURCE, { ...values, loop_fade: "0.4", loop_side_fade: "8" },
+                                  0.5, progress);
+    expect(progress).not.toHaveBeenCalled();
+    // 6 frames and 4 columns fewer, at half the frame rate and size.
+    expect(faded.volume).toEqual([plain.volume[0] - 6, 24, plain.volume[2] - 4]);
+    expect(faded.memory).toBe(plain.memory);
+    await live.show(SOURCE, values, 0.5, progress);
+    expect(drawn(canvas)).toEqual(unfaded);
+    expect(progress).not.toHaveBeenCalled();
+    live.dispose();
+  });
+
   test("keeps the clip it has through options it refuses", async () => {
     const { live, canvas } = make();
     const gl = canvas.getContext("webgl2")!;
@@ -184,7 +204,7 @@ describe("Live", () => {
     live.dispose();
   });
 
-  test("shows the clip's first frame as loaded for the cuboid", async () => {
+  test("shows the clip's first frame as faded for the cuboid", async () => {
     const { live, canvas } = make();
     expect(live.face()).toBeNull();
     const values = { angle: "0", loop: "1", loop_fade: "0.4", loop_sides: "1",
@@ -196,7 +216,7 @@ describe("Live", () => {
     expect([face.width, face.height]).toEqual([28, 24]);
     expect(new Uint8Array(face.data.buffer)).toEqual(first);
 
-    // One face for each clip loaded, so the page can tell when it changes.
+    // One face for each clip and its fades, so the page can tell when it changes.
     await live.show(SOURCE, { ...values, angle: "20" }, 0.6);
     expect(live.face()).toBe(face);
     await live.show(SOURCE, { ...values, loop_side_fade: "4" }, 0.6);
@@ -245,7 +265,8 @@ describe("Live", () => {
     live.dispose();
   });
 
-  test("refuses fades too long for the clip before decoding it", async () => {
+  test("refuses fades too long for the clip, and keeps the clip for fades that fit",
+       async () => {
     const { live } = make();
     const progress = vi.fn();
     expect(await problem(live.show(SOURCE, { loop: "1", loop_fade: "2" }, 0, progress)))
@@ -255,6 +276,8 @@ describe("Live", () => {
                                              loop_side_fade: "40" }, 0, progress)))
       .toEqual({ message: "The crossfade at the sides can be at most half the width, 32 "
                           + "pixels.", kind: "error" });
+    progress.mockClear();
+    await live.show(SOURCE, { loop: "1", loop_fade: "0.4" }, 0, progress);
     expect(progress).not.toHaveBeenCalled();
     live.dispose();
   });
@@ -422,7 +445,7 @@ describe("Live", () => {
     const gl = canvas.getContext("webgl2")!;
     const real = gl.getShaderParameter.bind(gl);
     vi.spyOn(gl, "getShaderParameter").mockImplementation((shader, name) =>
-      gl.getShaderSource(shader) === NOISY.rgba ? false : real(shader, name));
+      gl.getShaderSource(shader) === SLICE ? false : real(shader, name));
     const error = (() => { try { new Live(canvas); } catch (error) { return error; } })();
     expect(error).toBeInstanceOf(Problem);
     expect((error as Problem).message)

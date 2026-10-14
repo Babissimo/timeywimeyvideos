@@ -184,17 +184,8 @@ shorter, and some combinations don't fit:
 - A sheared frame always spans the video's whole width, so with
   perpendicular noise it stays inside only at 0°.
 
-To save time, the noise is worked out at points `size`/8 pixels apart and
-blended smoothly between them (Catmull-Rom). That comes within half a
-percent of the amplitude of the exact Perlin noise, and still never moves a
-point further than the amplitude. For bumps under 16 pixels apart, where
-those points would be under 2 pixels apart, it's worked out at every pixel
-instead.
-
 Previews and the live view shrink the amplitude and the size with the clip,
-so they show the same bumps as the full render. (For bumps 16 to 32 pixels
-apart the full render uses those points but the half-size preview works the
-noise out at every pixel, so the two can differ by up to that half percent.)
+so they show the same bumps as the full render.
 
 ### Loops
 
@@ -277,9 +268,9 @@ checks, builds the page and publishes it on GitHub Pages.
 `web/app.js` runs the page. The TypeScript in `web/src/` does the work:
 
 - `decode.ts` reads a clip's frames, `encode.ts` writes a render's.
-- `planner.ts` plans a sweep: the output size and where each column of each
-  frame reads the cuboid. `noise.ts` is the surface noise, and `options.ts`
-  reads the page's options into a plan.
+- `planner.ts` plans a sweep: the output size and the line through the
+  cuboid that each frame reads. `noise.ts` is the surface noise, and
+  `options.ts` reads the page's options into a plan.
 - `gpu/` holds the clip on the GPU (`volume.ts`) and slices it there
   (`slicer.ts`, `shaders.ts`).
 - `live.ts` runs the live preview; `render.ts` runs a render in a worker of

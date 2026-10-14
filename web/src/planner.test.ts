@@ -10,11 +10,18 @@ import { floorMod } from "./numbers";
 const T = 7, W = 11;
 const MOTIONS: Motion[] = ["perpendicular", "time", "longest"];
 
+/** Where each column of output frame f reads. */
+function columns(sweep: Sweep, f: number): { t: number[]; x: number[] } {
+  const { origin: [t, x], step: [dt, dx] } = sweep.at(f);
+  const along = Array.from({ length: sweep.width }, (_, j) => j);
+  return { t: along.map((j) => t + j * dt), x: along.map((j) => x + j * dx) };
+}
+
 /** Every column of every output frame, as [t, x] lists. */
 function positions(sweep: Sweep): [number[], number[]][] {
   return Array.from({ length: sweep.frames }, (_, f) => {
-    const { t, x } = sweep.at(f);
-    return [Array.from(t), Array.from(x)];
+    const { t, x } = columns(sweep, f);
+    return [t, x];
   });
 }
 
@@ -100,9 +107,9 @@ describe("geometry", () => {
   test("a whole-plane shear starts where only its last column is in the video", () => {
     const sweep = shearSweep(13, 5, 45);
     expect(sweep.frames).toBe(13 + 4);
-    const { t } = sweep.at(0);
+    const { t } = columns(sweep, 0);
     expect(t[4]).toBeCloseTo(0, 9);
-    expect(Math.max(...t.subarray(0, 4))).toBeLessThan(-0.5);
+    expect(Math.max(...t.slice(0, 4))).toBeLessThan(-0.5);
   });
 
   test("shear refuses 90 degrees as a bad option, not as a misfit", () => {
@@ -118,11 +125,6 @@ describe("geometry", () => {
       .toEqual(positions(shearSweep(T, W, 20)));
     expect(positions(planSweep(13, 5, { angle: 30, inside: true, motion: "time" })))
       .toEqual(positions(rotationSweep(13, 5, 30, { inside: true, motion: "time" })));
-  });
-
-  test("at(f) gives fresh arrays each time", () => {
-    const sweep = shearSweep(T, W, 20);
-    expect(sweep.at(1).x).not.toBe(sweep.at(1).x);
   });
 });
 
@@ -140,7 +142,7 @@ describe("loops", () => {
                                   ["shear", 45], ["shear", -70]] as const) {
       const sweep = planSweep(T, W, { slice, angle, loop: true });
       expect([sweep.frames, sweep.width]).toEqual([T, W]);
-      const first = sweep.at(0), after = sweep.at(sweep.frames);
+      const first = columns(sweep, 0), after = columns(sweep, sweep.frames);
       for (let j = 0; j < W; j++) {
         expect(Math.abs(after.t[j] - first.t[j])).toBeCloseTo(T, 9);
         expect(after.x[j]).toBeCloseTo(first.x[j], 9);
@@ -206,7 +208,7 @@ describe("noise", () => {
     const sweeps = [0, 30, 90, 135].map((angle) => rotationSweep(T, W, angle, { noise }));
     sweeps.push(shearSweep(T, W, 30, { noise }));
     for (const sweep of sweeps) {
-      const { t, x } = sweep.at(2);
+      const { t, x } = columns(sweep, 2);
       const [pushT, pushX] = noise.push(sweep.normal);
       expect(Math.abs(pushT * (t[1] - t[0]) + pushX * (x[1] - x[0]))).toBeLessThan(1e-9);
       expect(Math.hypot(pushT, pushX)).toBeCloseTo(1.5, 9);

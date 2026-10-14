@@ -1,7 +1,7 @@
 /**
- * Small WebGL2 helpers: programs, data textures and framebuffers. dataTexture, fill and
- * DataTexture.put bind to whichever texture unit is active, and program leaves its program
- * in use, so make a draw's textures and programs first, then bind every unit it samples.
+ * Small WebGL2 helpers: programs, data textures and framebuffers. dataTexture and fill bind to
+ * whichever texture unit is active, and program leaves its program in use, so make a draw's
+ * textures and programs first, then bind every unit it samples.
  */
 
 /** A linked program and its uniforms' locations. */
@@ -66,14 +66,8 @@ export function dataTexture(gl: WebGL2RenderingContext): WebGLTexture {
 /** The format and type texImage2D takes with each internal format used here. */
 function layout(gl: WebGL2RenderingContext, internalFormat: GLenum): [GLenum, GLenum] {
   switch (internalFormat) {
-    case gl.R32F: return [gl.RED, gl.FLOAT];
-    case gl.RG32F: return [gl.RG, gl.FLOAT];
-    case gl.RGBA32F: return [gl.RGBA, gl.FLOAT];
-    case gl.RGBA32UI: return [gl.RGBA_INTEGER, gl.UNSIGNED_INT];
     case gl.R32I: return [gl.RED_INTEGER, gl.INT];
-    case gl.RGBA32I: return [gl.RGBA_INTEGER, gl.INT];
     case gl.RGBA8: return [gl.RGBA, gl.UNSIGNED_BYTE];
-    case gl.RGBA8UI: return [gl.RGBA_INTEGER, gl.UNSIGNED_BYTE];
   }
   throw new Error(`no layout for internal format ${internalFormat}`);
 }
@@ -95,40 +89,6 @@ export function fill(gl: WebGL2RenderingContext, texture: WebGLTexture, internal
   gl.bindTexture(gl.TEXTURE_2D, texture);
   unpackAsIs(gl);
   gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, width, height, 0, format, type, data);
-}
-
-/** A data texture that keeps its storage while its size and format stay the same. */
-export class DataTexture {
-  readonly texture: WebGLTexture;
-  private readonly gl: WebGL2RenderingContext;
-  private width = 0;
-  private height = 0;
-  private format: GLenum = 0;
-
-  constructor(gl: WebGL2RenderingContext) {
-    this.gl = gl;
-    this.texture = dataTexture(gl);
-  }
-
-  /** Give it these contents, reallocating only for a new size or format. */
-  put(internalFormat: GLenum, width: number, height: number, data: ArrayBufferView): void {
-    const { gl } = this;
-    if (width !== this.width || height !== this.height || internalFormat !== this.format) {
-      fill(gl, this.texture, internalFormat, width, height, data);
-      this.width = width;
-      this.height = height;
-      this.format = internalFormat;
-      return;
-    }
-    const [format, type] = layout(gl, internalFormat);
-    gl.bindTexture(gl.TEXTURE_2D, this.texture);
-    unpackAsIs(gl);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, format, type, data);
-  }
-
-  dispose(): void {
-    this.gl.deleteTexture(this.texture);
-  }
 }
 
 /** Bind a texture to a unit. */

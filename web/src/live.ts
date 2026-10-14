@@ -7,12 +7,12 @@ import { Slicer, type SliceOptions } from "./gpu/slicer";
 import { Volume, VolumeTooLarge } from "./gpu/volume";
 import { looping, type Noise } from "./noise";
 import {
-  endpoints, liveNoise, loopFades, plan, Problem, readOptions, type OptionValues, type Options,
+  endpoints, liveNoise, planFaded, Problem, readOptions, type OptionValues, type Options,
 } from "./options";
-import { PREVIEW_SCALE, type Sweep, type TX } from "./planner";
+import { PREVIEW_SCALE, type Line, type Sweep, type TX } from "./planner";
 import { limitDenominator } from "./numbers";
 import { changed, hasChanged } from "./sources";
-import type { Columns, Rate } from "./types";
+import type { Rate } from "./types";
 
 type Ends = [number, number, number, number];
 
@@ -25,7 +25,7 @@ export interface FrameInfo {
   /** The frame rate the sweep plays at, and how long it lasts in seconds. */
   fps: number;
   seconds: number;
-  /** The clip as held, [frames, height, width], and the GPU memory it takes. */
+  /** The clip as faded, [frames, height, width], and the GPU memory it takes as held. */
   volume: [number, number, number];
   memory: number;
   loop: boolean;
@@ -36,13 +36,17 @@ export interface FrameInfo {
   last: Ends;
 }
 
-interface Clip { file: File; key: string; volume: Volume; fps: Rate; face?: ImageData }
+interface Clip {
+  file: File; key: string; volume: Volume; fps: Rate;
+  face?: { fade: TX; image: ImageData };  // its first frame with these fades
+}
 
 /** What every frame of a sweep shares, for one set of options and the clip they load. */
 interface Sweeping {
   opts: Options;
   clip: Clip;
   sweep: Sweep;
+  fade: TX;  // the frames and columns faded
   noise: { surface: Noise; push: TX } | null;
   info: Omit<FrameInfo, "frame" | "line">;
 }
@@ -55,8 +59,7 @@ function sameValues(a: OptionValues, b: OptionValues): boolean {
 }
 
 /** What the clip loaded for some options depends on: a change to it loads the clip afresh. */
-const loadKey = (opts: Options) =>
-  JSON.stringify([opts.scale, opts.start, opts.duration, opts.loopFade, opts.sideFade]);
+const loadKey = (opts: Options) => JSON.stringify([opts.scale, opts.start, opts.duration]);
 
 const SHRINK = limitDenominator(PREVIEW_SCALE);
 const LOST = "The live view lost the GPU, perhaps for want of memory. Set a shorter duration or "
@@ -92,7 +95,7 @@ export class Live {
     canvas.addEventListener("webglcontextlost", (event) => {
       event.preventDefault();
       this.loading?.abort(new Problem(LOST));
-      this.clip = null;
+      this.release();
     }, { signal });
     canvas.addEventListener("webglcontextrestored", () => {
       this.slicer = new Slicer(gl);
@@ -113,43 +116,37 @@ export class Live {
     const clip = await this.load(file, opts, progress);
     if (this.sweeping?.opts !== opts || this.sweeping.clip !== clip)
       this.sweeping = this.sweepFor(opts, clip);
-    const { sweep, noise, info } = this.sweeping;
+    const { sweep, fade, noise, info } = this.sweeping;
     const { volume } = clip;
     const f = Math.round((Math.min(Math.max(pos, 0), 1) || 0) * (sweep.frames - 1));
-    const columns = sweep.at(f);
-    const options = { nearest: true, wrap: sweep.loop, wrapX: sweep.sides };
-    if (noise) {
-      this.slice(volume, columns, { ...options, noise: {
-        push: noise.push, grid: noise.surface.grid(sweep.width, volume.height, f),
-      } });
-    } else {
-      this.slice(volume, columns, options);
-    }
+    this.slice(volume, sweep.width, sweep.at(f), {
+      nearest: true, wrap: sweep.loop, wrapX: sweep.sides, fade,
+      noise: noise ? { ...noise, f } : undefined,
+    });
     const canvas = this.gl.canvas;
     if (canvas.width !== sweep.width || canvas.height !== volume.height) {
       canvas.width = sweep.width;
       canvas.height = volume.height;
     }
     this.slicer.draw();
-    const { t, x } = columns, last = t.length - 1;
-    return { ...info, frame: f, line: [t[0], x[0], t[last], x[last]] };
+    return { ...info, frame: f, line: endpoints(sweep, f) };
   }
 
   /**
-   * The loaded clip's first frame, or null before a clip has loaded. It is the same
-   * ImageData for as long as the clip is held.
+   * The first frame of the clip held, as faded for the sweep last shown, or null until a sweep of
+   * it has been shown. It is the same ImageData for as long as the clip and its fades stay.
    */
   face(): ImageData | null {
-    const { clip } = this;
-    if (!clip || this.gl.isContextLost()) return null;
-    if (!clip.face) {
-      const { volume } = clip;
-      const x = Float64Array.from({ length: volume.width }, (_, i) => i);
-      this.slice(volume, { t: new Float64Array(volume.width), x }, { nearest: true });
+    const { clip, sweeping } = this;
+    if (!clip || sweeping?.clip !== clip || this.gl.isContextLost()) return null;
+    const { fade } = sweeping;
+    if (clip.face?.fade[0] !== fade[0] || clip.face.fade[1] !== fade[1]) {
+      const { volume } = clip, width = volume.width - fade[1];
+      this.slice(volume, width, { origin: [0, 0], step: [0, 1] }, { fade });
       const pixels = new Uint8ClampedArray(this.slicer.read().buffer as ArrayBuffer);
-      clip.face = new ImageData(pixels, volume.width, volume.height);
+      clip.face = { fade, image: new ImageData(pixels, width, volume.height) };
     }
-    return clip.face;
+    return clip.face.image;
   }
 
   /**
@@ -191,12 +188,13 @@ export class Live {
   private release(): void {
     this.clip?.volume.dispose();
     this.clip = null;
+    this.sweeping = null;
   }
 
   /** Slice a frame, or throw the Problem of one larger than the GPU can draw. */
-  private slice(volume: Volume, columns: Columns, options: SliceOptions): void {
+  private slice(volume: Volume, width: number, line: Line, options: SliceOptions): void {
     try {
-      this.slicer.slice(volume, columns, options);
+      this.slicer.slice(volume, width, line, options);
     } catch (error) {
       if (!(error instanceof RangeError)) throw error;
       throw new Problem(`The live view can't draw frames this large on this GPU: `
@@ -209,24 +207,26 @@ export class Live {
   private sweepFor(opts: Options, clip: Clip): Sweeping {
     const { volume } = clip;
     const noise = liveNoise(opts);
-    const sweep = plan(volume.frames, volume.width, opts, noise);
+    const { fade, sweep } = planFaded(volume.frames, volume.width, clip.fps.num / clip.fps.den,
+                                      opts, noise, PREVIEW_SCALE);
     const surface = noise && looping(noise, sweep);
     const fps = opts.fps ? { num: opts.fps.num * SHRINK.num, den: opts.fps.den * SHRINK.den }
                          : clip.fps;  // already the rate of the frames kept
     return {
-      opts, clip, sweep,
+      opts, clip, sweep, fade,
       noise: surface && { surface, push: surface.push(sweep.normal) },
       info: {
         width: sweep.width, height: volume.height, frames: sweep.frames,
         fps: fps.num / fps.den, seconds: sweep.frames * fps.den / fps.num,
-        volume: [volume.frames, volume.height, volume.width], memory: volume.bytes,
+        volume: [volume.frames - fade[0], volume.height, volume.width - fade[1]],
+        memory: volume.bytes,
         loop: sweep.loop, sides: sweep.sides,
         first: endpoints(sweep, 0), last: endpoints(sweep, sweep.frames - 1),
       },
     };
   }
 
-  /** The clip for these options, loading it if it changed, with the loop's crossfades done. */
+  /** The clip for these options, loading it if it changed. */
   private async load(file: File, opts: Options,
                      progress?: (done: number, total: number) => void): Promise<Clip> {
     if (this.gl.isContextLost()) throw new Problem(LOST);
@@ -243,9 +243,6 @@ export class Live {
       };
       const planned = await planLoad(file, options);
       signal.throwIfAborted();
-      // Refuse fades that don't fit before decoding the clip.
-      const [frames, columns] = loopFades(planned.frames, planned.width,
-                                          planned.fps.num / planned.fps.den, opts, PREVIEW_SCALE);
       const volume = this.allocate(planned);
       try {
         await load(file, options, (i, frame) => {
@@ -255,9 +252,6 @@ export class Live {
         signal.throwIfAborted();
         // The context can be lost before its event arrives, and uploads to a lost one do nothing.
         if (this.gl.isContextLost()) throw new Problem(LOST);
-        // The fades work in place, so a change to them loads the clip afresh.
-        volume.crossfade(frames, 0);
-        volume.crossfade(columns, 2);
       } catch (error) {
         volume.dispose();
         throw error;
@@ -297,7 +291,7 @@ export class Live {
     }
     this.release();  // let the old clip go before the new one takes its memory
     try {
-      return Volume.create(gl, frames, height, width, { format: "yuv420" });
+      return Volume.create(gl, frames, height, width);
     } catch (error) {
       if (!(error instanceof VolumeTooLarge)) throw error;
       throw new Problem(`The live view would need ${(error.bytes / 1e9).toFixed(1)} GB of GPU `
