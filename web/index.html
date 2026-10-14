@@ -24,8 +24,8 @@
         <span>Open a video, or drop one anywhere on the page</span>
       </label>
       <button id="open-folder" class="quiet" hidden>Open a folder of videos</button>
-      <p class="note" id="folder-note"></p>
-      <p class="note" id="source-info"></p>
+      <p class="note" id="folder-note" aria-live="polite"></p>
+      <p class="note" id="source-info" aria-live="polite"></p>
       <p class="note">Videos stay on this computer: nothing is uploaded.</p>
     </section>
 
@@ -41,7 +41,7 @@
         <label for="angle">Angle about y</label>
         <div class="angle">
           <input type="range" id="angle-range" min="-180" max="180" step="0.5" value="45" aria-label="Angle">
-          <input type="number" id="angle" min="-180" max="180" step="0.5" value="45">
+          <input type="number" id="angle" min="-180" max="180" step="any" value="45">
           <span class="muted">°</span>
         </div>
       </div>
@@ -100,7 +100,7 @@
           <label for="noise-amount">Amplitude (frames)</label>
           <div class="angle">
             <input type="range" id="noise-range" min="0" max="60" step="0.5" value="10" aria-label="Amplitude">
-            <input type="number" id="noise-amount" min="0" step="0.5" value="10">
+            <input type="number" id="noise-amount" min="0" step="any" value="10">
           </div>
         </div>
         <div class="pair spaced">
@@ -124,12 +124,12 @@
       <h2>Render</h2>
       <p class="note" id="estimate"></p>
       <div class="buttons">
-        <button id="render-preview">Render preview</button>
-        <button id="render-full" class="primary">Render full quality</button>
+        <button id="render-preview" disabled>Render preview</button>
+        <button id="render-full" class="primary" disabled>Render full quality</button>
       </div>
       <div id="job" hidden>
         <div class="bar"><div id="job-bar"></div></div>
-        <p class="note" id="job-text"></p>
+        <p class="note" id="job-text" aria-live="polite"></p>
         <button id="cancel" class="quiet">Cancel</button>
       </div>
     </section>
@@ -157,7 +157,7 @@
         <h2>Live preview</h2>
         <span class="note" id="live-info"></span>
       </div>
-      <div class="stage">
+      <div class="stage" id="live-stage" aria-live="polite">
         <canvas id="live"></canvas>
         <div class="overlay" id="live-message">
           <p id="live-text"></p>
@@ -193,7 +193,7 @@
     <section class="card wide">
       <div class="head">
         <h2>Renders</h2>
-        <span class="note" id="now-playing"></span>
+        <span class="note" id="now-playing" aria-live="polite"></span>
       </div>
       <video id="player" controls loop hidden></video>
       <ul id="renders"></ul>

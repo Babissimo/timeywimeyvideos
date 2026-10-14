@@ -54,6 +54,10 @@ function sameValues(a: OptionValues, b: OptionValues): boolean {
     && keys.every((key) => Object.hasOwn(b, key) && Object.is(a[key], b[key]));
 }
 
+/** What the clip loaded for some options depends on: a change to it loads the clip afresh. */
+const loadKey = (opts: Options) =>
+  JSON.stringify([opts.scale, opts.start, opts.duration, opts.loopFade, opts.sideFade]);
+
 const SHRINK = limitDenominator(PREVIEW_SCALE);
 const LOST = "The live view lost the GPU, perhaps for want of memory. Set a shorter duration or "
   + "a smaller scale, or reload the page.";
@@ -64,6 +68,7 @@ export class Live {
   private slicer: Slicer;
   private clip: Clip | null = null;
   private loading: AbortController | null = null;
+  private loadingKey = "";  // the load key of the clip `loading` loads
   private parsed: { values: OptionValues; opts: Options } | null = null;
   private sweeping: Sweeping | null = null;
   private readonly listening = new AbortController();
@@ -155,6 +160,21 @@ export class Live {
     if (this.clip?.file === from) this.clip.file = to;
   }
 
+  /**
+   * Stop a load under way that these option values don't want, so the next show() can start
+   * theirs at once. Values it can't read leave the load be, for show() to say what's wrong.
+   */
+  supersede(values: OptionValues): void {
+    if (!this.loading) return;
+    let key: string;
+    try {
+      key = loadKey(readOptions(values));
+    } catch {
+      return;
+    }
+    if (key !== this.loadingKey) this.loading.abort();
+  }
+
   /** Let go of the clip and its file, stopping any load under way. */
   unload(): void {
     this.loading?.abort();
@@ -210,11 +230,11 @@ export class Live {
   private async load(file: File, opts: Options,
                      progress?: (done: number, total: number) => void): Promise<Clip> {
     if (this.gl.isContextLost()) throw new Problem(LOST);
-    const key = JSON.stringify([opts.scale, opts.start, opts.duration, opts.loopFade,
-                                opts.sideFade]);
+    const key = loadKey(opts);
     if (this.clip?.file === file && this.clip.key === key) return this.clip;
     const controller = new AbortController();
     this.loading = controller;
+    this.loadingKey = key;
     const { signal } = controller;
     try {
       const options: LoadOptions = {

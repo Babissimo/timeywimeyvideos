@@ -81,14 +81,14 @@ function options() {
   const noise = $("noise").checked;
   return {
     slice,
-    angle: $("angle").value || "0",
+    angle: sliceAngle(),
     inside: edges() === "inside" ? "1" : "",
     motion: moves() ? $("motion").value : "",
     loop: loop ? "1" : "",
     loop_fade: loop ? $("loop-fade").value : "",
     loop_sides: sides ? "1" : "",
     loop_side_fade: sides ? $("side-fade").value : "",
-    noise: noise ? $("noise-amount").value || "0" : "",
+    noise: noise ? noiseAmount() : "",
     noise_size: noise ? $("noise-size").value : "",
     noise_speed: noise ? $("noise-speed").value : "",
     noise_direction: noise ? $("noise-direction").value : "",
@@ -101,9 +101,10 @@ function options() {
 }
 
 function seconds(s) {
-  if (s < 60) return `${s.toFixed(1)} s`;
-  const m = Math.floor(s / 60);
-  return `${m}:${String(Math.round(s - m * 60)).padStart(2, "0")}`;
+  const tenths = s.toFixed(1);
+  if (Number(tenths) < 60) return `${tenths} s`;
+  const whole = Math.round(s);  // rounded first, or 119.6 s would read 1:60
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
 }
 
 function bytes(n) {
@@ -138,6 +139,7 @@ function liveView() {
 
 function refresh() {
   again = true;
+  live?.supersede(options());  // a load for other options would only hold up theirs
   pump();
   estimate();
 }
@@ -152,8 +154,8 @@ async function pump() {
   const opts = options();
   // Once another source is chosen, the message is that one's to give.
   const chosen = state.chosen;
-  const loading = (text) => {
-    if (state.chosen === chosen) showMessage(text);
+  const loading = (text, progress = false) => {
+    if (state.chosen === chosen) showMessage(text, null, progress);
   };
   let slow = false;
   const timer = setTimeout(() => {
@@ -162,7 +164,7 @@ async function pump() {
   }, 300);
   try {
     const info = await liveView().show(file, opts, state.pos, (done, total) => {
-      if (slow) loading(`Loading the clip… ${Math.floor(100 * done / total)}%`);
+      if (slow) loading(`Loading the clip… ${Math.floor(100 * done / total)}%`, true);
     });
     const resized = !state.info || state.info.frames !== info.frames;
     state.info = info;
@@ -172,7 +174,9 @@ async function pump() {
     drawCube();
     loadFace();
   } catch (err) {
-    if (err.name !== "AbortError") {  // else another source took over
+    if (err.name === "AbortError") {  // another source or other options took over
+      if (slow) loading("Loading the clip…", true);  // as theirs loads, without this load's figure
+    } else {
       pause();
       showMessage(err.message,
         err.kind === "does_not_fit" ?
@@ -187,7 +191,10 @@ async function pump() {
   }
 }
 
-function showMessage(text, action) {
+// Show a message over the live view, with a button for a way out if there is one. A busy
+// message, such as how far a load has got, isn't read out at each change.
+function showMessage(text, action, busy = false) {
+  $("live-stage").setAttribute("aria-busy", String(busy));  // set before the text it governs
   $("live-message").hidden = false;
   $("live-text").textContent = text;
   const button = $("live-action");
@@ -200,6 +207,7 @@ function showMessage(text, action) {
 
 function hideMessage() {
   $("live-message").hidden = true;
+  $("live-stage").setAttribute("aria-busy", "false");
 }
 
 function describe() {
@@ -209,6 +217,15 @@ function describe() {
     `${info.width}×${info.height} · ${info.frames} frames · ${seconds(info.seconds)}`;
   $("frame-label").textContent = `${info.frame + 1} / ${info.frames}`;
   if (!state.scrubbing) $("scrub").value = Math.round(state.pos * 1000);
+  scrubText();
+}
+
+// What the scrubber says it is at, to assistive technology: a frame rather than 0 to 1000.
+function scrubText() {
+  const info = state.info;
+  if (!info) return $("scrub").removeAttribute("aria-valuetext");
+  const frame = Math.round(state.pos * (info.frames - 1)) + 1;
+  $("scrub").setAttribute("aria-valuetext", `Frame ${frame} of ${info.frames}`);
 }
 
 // What a full-quality render would make. It needs only the clip and the options, not the
@@ -235,6 +252,7 @@ function estimate() {
 // frame is due and shows it, skipping any the live view can't keep up with.
 
 const clock = { start: 0, frame: 0 };
+let ticking = 0;  // the request for tick's next animation frame
 
 function anchor() {
   clock.start = performance.now();
@@ -251,7 +269,7 @@ function tick(now) {
       refresh();
     }
   }
-  requestAnimationFrame(tick);
+  ticking = requestAnimationFrame(tick);
 }
 
 function play() {
@@ -261,7 +279,8 @@ function play() {
   $("play").textContent = "❚❚";
   $("play").setAttribute("aria-label", "Pause");
   anchor();
-  requestAnimationFrame(tick);
+  cancelAnimationFrame(ticking);  // still due if paused and played again within a frame
+  ticking = requestAnimationFrame(tick);
 }
 
 function pause() {
@@ -284,6 +303,7 @@ $("play").addEventListener("click", () => (state.playing ? pause() : play()));
 $("scrub").addEventListener("pointerdown", () => { state.scrubbing = true; });
 $("scrub").addEventListener("input", () => {
   state.pos = $("scrub").value / 1000;
+  scrubText();
   refresh();
 });
 for (const done of ["pointerup", "pointercancel", "change"]) {
@@ -294,7 +314,9 @@ for (const done of ["pointerup", "pointercancel", "change"]) {
 }
 
 document.addEventListener("keydown", (e) => {
-  if (e.target.closest("input, select, textarea") && e.target.type !== "range") return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;  // the browser's shortcuts, such as Back
+  // Fields take their own keys, and so does the player's video.
+  if (e.target.closest("input, select, textarea, video") && e.target.type !== "range") return;
   if (e.key === " " && e.target.tagName !== "BUTTON") {
     e.preventDefault();
     state.playing ? pause() : play();
@@ -314,8 +336,7 @@ function slicesChanged() {
     input.min = -limit;
     input.max = limit;
   }
-  const angle = Number($("angle").value) || 0;
-  if (Math.abs(angle) > limit) setAngle(Math.sign(angle) * limit);
+  setAngle(sliceAngle());
   const loop = edges() === "loop", sides = loop && $("loop-sides").checked;
   $("edges-note").textContent = DESCRIBE[edges()];
   $("loop-fields").hidden = !loop;
@@ -346,15 +367,34 @@ for (const input of document.querySelectorAll(
   'input[name="slice"], input[name="edges"], #motion, #loop-sides')) {
   input.addEventListener("change", slicesChanged);
 }
-$("angle-range").addEventListener("input", () => {
-  $("angle").value = $("angle-range").value;
-  refresh();
-});
-$("angle").addEventListener("input", () => {
-  if ($("angle").value === "" || !$("angle").checkValidity()) return;
-  $("angle-range").value = $("angle").value;
-  refresh();
-});
+// A slider and the number box beside it, which set one value: the box's number, held within its
+// bounds. The slider shows the value to its own step, and the box shows it once left. While the
+// box holds no number, as while a minus sign is typed, the value stays as it was. Returns a
+// function that gives the value.
+function pair(slider, box, changed) {
+  let last = 0;
+  const value = () => {
+    if (box.value !== "") {  // it is "" while the box holds no number
+      const min = box.min === "" ? -Infinity : Number(box.min);
+      const max = box.max === "" ? Infinity : Number(box.max);
+      last = Math.min(Math.max(Number(box.value), min), max);
+    }
+    return last;
+  };
+  slider.addEventListener("input", () => {
+    box.value = slider.value;
+    changed();
+  });
+  box.addEventListener("input", () => {
+    if (box.value === "") return;
+    slider.value = String(value());
+    changed();
+  });
+  box.addEventListener("change", () => { box.value = String(value()); });
+  return value;
+}
+
+const sliceAngle = pair($("angle-range"), $("angle"), refresh);
 for (const id of ["start", "duration", "scale", "fps", "loop-fade", "side-fade"]) {
   $(id).addEventListener("change", refresh);
 }
@@ -366,7 +406,7 @@ function noiseChanged() {
   $("noise-note").textContent = DESCRIBE[`noise-${direction}`];
   $("cube-noise").hidden = !on;
   $("cube-noise").textContent = "With noise on, the real surface is bumpy: the frame " +
-    `is drawn on the flat plane its points are pushed off, up to ${$("noise-amount").value || 0} ` +
+    `is drawn on the flat plane its points are pushed off, up to ${noiseAmount()} ` +
     `frames ${direction === "time" ? "through time" : "perpendicular to it"}.`;
   refresh();
 }
@@ -374,15 +414,7 @@ function noiseChanged() {
 for (const id of ["noise", "noise-size", "noise-speed", "noise-direction", "noise-seed"]) {
   $(id).addEventListener("change", noiseChanged);
 }
-$("noise-range").addEventListener("input", () => {
-  $("noise-amount").value = $("noise-range").value;
-  noiseChanged();
-});
-$("noise-amount").addEventListener("input", () => {
-  if ($("noise-amount").value === "" || !$("noise-amount").checkValidity()) return;
-  $("noise-range").value = $("noise-amount").value;
-  noiseChanged();
-});
+const noiseAmount = pair($("noise-range"), $("noise-amount"), noiseChanged);
 
 // ---------------------------------------------------------------------------
 // Sources: videos opened on this computer, on their own or a folder at a time,
@@ -458,7 +490,9 @@ async function chooseSource(id) {
   $("source-info").textContent = "";
   $("live-info").textContent = "";
   $("frame-label").textContent = "";
+  scrubText();
   estimate();
+  enableRender();
   if (!file) {
     showMessage(UNABLE || NO_SOURCE);
     return;
@@ -482,7 +516,7 @@ async function chooseSource(id) {
 
 function watchOriginal() {
   original ??= URL.createObjectURL(state.source);
-  watch(original, state.source.name);
+  watch(original, state.source.name, state.source);
 }
 
 // Let go of the chosen file's address, and stop the player if it plays it.
@@ -871,6 +905,7 @@ async function render(preview) {
   const values = options();
   const controller = new AbortController();
   job = controller;
+  enableRender();
   const began = performance.now();
   const kind = preview ? "preview" : "full-quality render";
   showJob({ running: true, text: "Starting…" });
@@ -893,19 +928,26 @@ async function render(preview) {
     else showJob({ error: true, text: err.message });
   } finally {
     job = null;
+    enableRender();
   }
 }
 
 // What the render panel shows: whether one is running, how far through (0 to 1),
 // and what it says.
 function showJob({ running = false, done = 0, text = "", error = false }) {
-  $("render-preview").disabled = running;
-  $("render-full").disabled = running;
   $("job").hidden = false;
   $("cancel").hidden = !running;
   $("job-bar").style.width = `${100 * done}%`;
+  $("job-text").setAttribute("aria-busy", String(running));  // so only how it ends is read
   $("job-text").classList.toggle("error", error);
   $("job-text").textContent = text;
+}
+
+// The render buttons work once a video is chosen, for one render at a time.
+function enableRender() {
+  const off = Boolean(job) || !state.source;
+  $("render-preview").disabled = off;
+  $("render-full").disabled = off;
 }
 
 $("render-preview").addEventListener("click", () => render(true));
@@ -984,12 +1026,21 @@ function link(text, onclick) {
 }
 
 // Play a video in the player: the chosen file, or a render.
-function watch(url, label) {
-  const player = $("player");
+function watch(url, label, file = null) {
+  const player = $("player"), note = $("now-playing");
+  player.onerror = async () => {  // as for an original in a format only the page itself reads
+    const gone = file && await hasChanged(file);
+    if (player.src !== url) return;  // another video since
+    player.hidden = true;
+    note.textContent = gone ? changed(label) : `This browser's player can't play ${label}.`;
+    note.classList.add("error");
+    markPlaying();
+  };
   player.hidden = false;
   player.src = url;
   player.play().catch(() => { /* autoplay may be blocked; the controls still work */ });
-  $("now-playing").textContent = label;
+  note.textContent = label;
+  note.classList.remove("error");
   markPlaying();
 }
 
@@ -1008,6 +1059,7 @@ function start() {
   noiseChanged();
   showRenders();
   showSources();
+  enableRender();  // as Firefox may keep a button's state from before a reload
   showMessage(UNABLE || NO_SOURCE);
 }
 
