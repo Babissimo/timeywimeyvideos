@@ -130,6 +130,21 @@ describe("render", () => {
     expect(off(end)).toBeLessThan(off(start) / 4);
   });
 
+  test("gives an odd sweep's frames the next column along, not black", async () => {
+    // A loop round the sides of the clip at 63 × 47, whose left and right halves differ, so
+    // that the 64th column is its first come round again.
+    const made = await render(await clip("h264-30.mp4"),
+                              { angle: "0", loop: "1", loop_sides: "1", scale: "0.98" });
+    expect([made.width, made.height]).toEqual([64, 48]);
+    for (const frame of await framesOf(made.video, [0, 20])) {
+      const means = thumbnail(frame, 64, 48, 64, 1);  // each column's mean colour
+      const column = (x: number) => means.slice(3 * x, 3 * x + 3);
+      const off = (a: number[], b: number[]) => Math.max(...a.map((v, k) => Math.abs(v - b[k])));
+      expect(off(column(0), column(62))).toBeGreaterThan(12);
+      expect(off(column(63), column(0))).toBeLessThanOrEqual(6);
+    }
+  });
+
   test("stops the worker when cancelled", async () => {
     const { start, ended } = watched();
     const controller = new AbortController();

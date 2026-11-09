@@ -37,7 +37,8 @@ export class Slicer {
   private readonly framebuffer: WebGLFramebuffer;
   private width = 0;  // of the last slice, 0 before the first
   private height = 0;
-  private readonly maxSize: number;  // the most pixels a slice can have each way
+  /** The most pixels a slice can have each way. */
+  readonly maxSize: number;
 
   constructor(gl: WebGL2RenderingContext) {
     this.gl = gl;
@@ -100,6 +101,12 @@ export class Slicer {
     volume.planes.forEach(({ texture }, unit) => bind(gl, unit, texture, gl.TEXTURE_2D_ARRAY));
     bind(gl, 2, this.hash);
     this.cover(this.framebuffer, width, height);
+  }
+
+  /** The last slice, an RGBA8 texture its size, row 0 its top. */
+  get texture(): WebGLTexture {
+    this.sliced();
+    return this.output;
   }
 
   /** The last slice as RGBA bytes, rows top-first. */
