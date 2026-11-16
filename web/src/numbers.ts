@@ -20,9 +20,6 @@ export function decimal(x: number, digits = 6): string {
   return String(Number(x.toPrecision(digits)));
 }
 
-// The decoder times frames by ffmpeg's rules, which round halves to even and turn rates into
-// fractions as Python's Fraction.limit_denominator does.
-
 /** x to the nearest integer, halves to even, and never -0. */
 export function roundHalfEven(x: number): number {
   if (!Number.isFinite(x)) return x;
