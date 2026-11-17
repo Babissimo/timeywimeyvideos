@@ -24,10 +24,12 @@ copied.
 - **Cuboid** draws the clip as a box (one unit per pixel or frame), with the
   first frame at the front and time running back, the current output frame
   drawn where it cuts through, and the region the sweep covers shaded on top.
-  Drag to turn it, scroll to zoom, or pick a view; **Top** is the x-t diagram
-  below. With surface noise on it still draws the flat plane the points are
-  pushed off, not the bumps. On a loop, each part of the frame past an end
-  (or a side) of the box is drawn where it wraps round to.
+  Drag to turn it, scroll with Ctrl or ⌘ held or pinch a trackpad to zoom, or
+  pick a view; **Top** is the x-t diagram below. On a touchscreen a sideways
+  drag turns it, and a swipe up or down scrolls the page. With surface noise
+  on it still draws the flat plane the points are pushed off, not the bumps.
+  On a loop, each part of the frame past an end (or a side) of the box is
+  drawn where it wraps round to.
 - **Render preview** and **Render full quality** render the slice with the
   options on the page and encode it as H.264 in an MP4, named after the clip
   and the options that differ from the defaults. A render runs on its own
