@@ -16,7 +16,7 @@
 
 <main>
   <aside>
-    <section class="card">
+    <section class="card" id="source-card">
       <h2>Source</h2>
       <select id="source" aria-label="Video"></select>
       <label class="drop" id="drop">
@@ -30,7 +30,7 @@
       <p class="note">Videos stay on this computer: nothing is uploaded.</p>
     </section>
 
-    <section class="card">
+    <section class="card" id="slice-card">
       <h2>Slice</h2>
       <div class="segmented" role="radiogroup" aria-label="Kind of slice">
         <label><input type="radio" name="slice" value="rotate" checked><span>Rotate</span></label>
@@ -88,7 +88,7 @@
       </div>
     </section>
 
-    <section class="card">
+    <section class="card" id="noise-card">
       <h2>Surface noise</h2>
       <label class="check first">
         <input type="checkbox" id="noise">
@@ -121,7 +121,7 @@
       </div>
     </section>
 
-    <section class="card">
+    <section class="card" id="render-card">
       <h2>Render</h2>
       <p class="note" id="estimate"></p>
       <div class="buttons">
@@ -134,7 +134,7 @@
         <button id="cancel" class="quiet">Cancel</button>
       </div>
     </section>
-    <section class="card">
+    <section class="card" id="clip-card">
       <h2>Clip</h2>
       <div class="pair">
         <div class="field"><label for="start">Start (s)</label>
@@ -153,7 +153,7 @@
   </aside>
 
   <div id="views">
-    <section class="card">
+    <section class="card" id="live-card">
       <div class="head">
         <h2>Live preview</h2>
         <span class="note" id="live-info"></span>
@@ -174,7 +174,7 @@
         arrow keys step.</p>
     </section>
 
-    <section class="card">
+    <section class="card" id="cube-card">
       <div class="head">
         <h2>Cuboid</h2>
         <div class="views" role="group" aria-label="View">
@@ -191,7 +191,7 @@
       <p class="note" id="cube-noise" hidden></p>
     </section>
 
-    <section class="card wide">
+    <section class="card wide" id="renders-card">
       <div class="head">
         <h2>Renders</h2>
         <span class="note" id="now-playing" aria-live="polite"></span>
