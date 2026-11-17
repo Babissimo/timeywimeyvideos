@@ -3,7 +3,7 @@ import raw from "../test/fixtures/live.json?raw";
 import h264 from "../test/fixtures/decode/h264-30.mp4?url";
 import rot90 from "../test/fixtures/decode/h264-rot90.mp4?url";
 import { SLICE } from "./gpu/shaders";
-import { Volume, VolumeTooLarge } from "./gpu/volume";
+import { LOST } from "./gpu/volume";
 import { Live, type FrameInfo } from "./live";
 import { Noise } from "./noise";
 import { endpoints, liveNoise, plan, Problem, readOptions } from "./options";
@@ -192,8 +192,8 @@ describe("Live", () => {
       [{ ...values, loop_fade: "2" },
        "The crossfade at the ends can be at most half the clip, 0.667 s."],
       [{ ...values, scale: String(size) },
-       `The live view can hold frames at most ${size} pixels across on this GPU, and this `
-       + `clip's are ${32 * size}×${24 * size} at half size. Set a smaller scale.`],
+       `The GPU can hold frames at most ${size} pixels across, and this clip's are `
+       + `${32 * size}×${24 * size} at half size. Set a smaller scale.`],
     ] as const) {
       progress.mockClear();
       expect(await problem(live.show(SOURCE, refused, 0.5, progress)))
@@ -290,30 +290,17 @@ describe("Live", () => {
     live.dispose();
   });
 
-  test("says when the GPU can't hold the clip, before decoding it", async () => {
+  test("says when the GPU can't hold the clip at half its frame rate, before decoding it",
+       async () => {
     const { live, canvas } = make();
     const gl = canvas.getContext("webgl2")!;
     const progress = vi.fn();
-    vi.spyOn(Volume, "create").mockImplementation(() => { throw new VolumeTooLarge(2.46e9); });
-    expect(await problem(live.show(SOURCE, {}, 0, progress))).toEqual({
-      message: "The live view would need 2.5 GB of GPU memory for this clip, more than the GPU "
-        + "can give it. Set a shorter duration or a smaller scale.",
-      kind: "error",
-    });
-    vi.restoreAllMocks();
-
-    const size = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
-    const scale = String((size + 64) / 32);  // half size is 64 pixels too wide
-    expect((await problem(live.show(SOURCE, { scale }, 0, progress))).message)
-      .toBe(`The live view can hold frames at most ${size} pixels across on this GPU, and this `
-            + `clip's are ${size + 64}×${(size + 64) * 3 / 4} at half size. Set a smaller scale.`);
-
     const real = gl.getParameter.bind(gl);
     vi.spyOn(gl, "getParameter").mockImplementation((name: GLenum) =>
       name === gl.MAX_ARRAY_TEXTURE_LAYERS ? 10 : real(name));
     expect((await problem(live.show(SOURCE, {}, 0, progress))).message)
-      .toBe("The live view can hold at most 10 frames on this GPU, and this clip has 20 at "
-            + "half its frame rate. Set a shorter duration.");
+      .toBe("The GPU can hold at most 10 frames, and this clip has 20 at half its frame rate. "
+            + "Set a shorter duration.");
     expect(progress).not.toHaveBeenCalled();
     live.dispose();
   });
@@ -422,7 +409,7 @@ describe("Live", () => {
     const live = new Live(canvas);
     const showing = live.show(SOURCE, {}, 0);
     canvas.getContext("webgl2")!.getExtension("WEBGL_lose_context")!.loseContext();  // as it plans the load
-    expect((await problem(showing)).message).toContain("lost the GPU");
+    expect((await problem(showing)).message).toBe(LOST);
     live.dispose();
   });
 
@@ -435,7 +422,7 @@ describe("Live", () => {
     const showing = live.show(SOURCE, {}, 0, (done) => {
       if (done === 1) lose.loseContext();
     });
-    expect((await problem(showing)).message).toContain("lost the GPU");
+    expect((await problem(showing)).message).toBe(LOST);
     live.dispose();
   });
 
@@ -471,9 +458,8 @@ describe("Live", () => {
       if (done === 1) lose.loseContext();
     });
     await lost;
-    expect((await problem(loading)).message).toContain("lost the GPU");
-    expect((await problem(live.show(SOURCE, { angle: "30" }, 0.5))).message)
-      .toContain("lost the GPU");
+    expect((await problem(loading)).message).toBe(LOST);
+    expect((await problem(live.show(SOURCE, { angle: "30" }, 0.5))).message).toBe(LOST);
     expect(live.face()).toBeNull();
     const restored = new Promise((resolve) =>
       canvas.addEventListener("webglcontextrestored", resolve));

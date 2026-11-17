@@ -2,9 +2,9 @@
  * The live preview: a copy of the clip at half size in x, y and time, held on the GPU in YUV
  * 4:2:0 and sliced there a frame at a time, as a render preview makes it.
  */
-import { load, planLoad, VideoError, type LoadOptions, type LoadPlan } from "./decode";
+import { planLoad, VideoError, type LoadOptions } from "./decode";
 import { Slicer, type SliceOptions } from "./gpu/slicer";
-import { Volume, VolumeTooLarge } from "./gpu/volume";
+import { LOST, Volume } from "./gpu/volume";
 import { looping, type Noise } from "./noise";
 import {
   endpoints, liveNoise, planFaded, Problem, readOptions, type OptionValues, type Options,
@@ -62,8 +62,6 @@ function sameValues(a: OptionValues, b: OptionValues): boolean {
 const loadKey = (opts: Options) => JSON.stringify([opts.scale, opts.start, opts.duration]);
 
 const SHRINK = limitDenominator(PREVIEW_SCALE);
-const LOST = "The live view lost the GPU, perhaps for want of memory. Set a shorter duration or "
-  + "a smaller scale, or reload the page.";
 
 /** The live view on a canvas, which it draws with WebGL2. */
 export class Live {
@@ -243,19 +241,10 @@ export class Live {
       };
       const planned = await planLoad(file, options);
       signal.throwIfAborted();
-      const volume = this.allocate(planned);
-      try {
-        await load(file, options, (i, frame) => {
-          volume.upload(i, frame);
-          frame.close();
-        }, progress);
-        signal.throwIfAborted();
-        // The context can be lost before its event arrives, and uploads to a lost one do nothing.
-        if (this.gl.isContextLost()) throw new Problem(LOST);
-      } catch (error) {
-        volume.dispose();
-        throw error;
-      }
+      // The clip held goes before the new one takes its memory, and stays if the new one is
+      // past the GPU's limits.
+      const volume = Volume.create(this.gl, planned, { preview: true, free: () => this.release() });
+      await volume.decode(file, options, progress);
       this.clip = { file, key, volume, fps: planned.fps };
       return this.clip;
     } catch (error) {
@@ -266,37 +255,6 @@ export class Live {
       throw error;
     } finally {
       if (this.loading === controller) this.loading = null;
-    }
-  }
-
-  /**
-   * A volume for the planned frames in place of the clip held, or the Problem of one too
-   * large for the GPU. A clip refused for the GPU's limits is kept.
-   */
-  private allocate({ frames, height, width }: LoadPlan): Volume {
-    const { gl } = this;
-    // The context can be lost before its event arrives, and a lost one gives no limits.
-    if (gl.isContextLost()) throw new Problem(LOST);
-    const layers = gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS) as number;
-    const size = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
-    if (frames > layers) {
-      throw new Problem(`The live view can hold at most ${layers} frames on this GPU, and `
-                        + `this clip has ${frames} at half its frame rate. Set a shorter `
-                        + "duration.");
-    }
-    if (width > size || height > size) {
-      throw new Problem(`The live view can hold frames at most ${size} pixels across on this `
-                        + `GPU, and this clip's are ${width}×${height} at half size. Set a `
-                        + "smaller scale.");
-    }
-    this.release();  // let the old clip go before the new one takes its memory
-    try {
-      return Volume.create(gl, frames, height, width);
-    } catch (error) {
-      if (!(error instanceof VolumeTooLarge)) throw error;
-      throw new Problem(`The live view would need ${(error.bytes / 1e9).toFixed(1)} GB of GPU `
-                        + "memory for this clip, more than the GPU can give it. Set a shorter "
-                        + "duration or a smaller scale.");
     }
   }
 }

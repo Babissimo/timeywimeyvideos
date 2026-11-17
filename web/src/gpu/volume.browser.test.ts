@@ -1,6 +1,7 @@
-import { afterAll, describe, expect, onTestFinished, test } from "vitest";
+import { afterAll, describe, expect, onTestFinished, test, vi } from "vitest";
 import { type Clip, noisyClip, readLayer, rgba, upload } from "../../test/gpu";
-import { Volume, VolumeTooLarge } from "./volume";
+import { Problem } from "../options";
+import { Volume } from "./volume";
 
 const gl = document.createElement("canvas").getContext("webgl2")!;
 afterAll(() => gl.getExtension("WEBGL_lose_context")?.loseContext());
@@ -70,14 +71,14 @@ function compare(got: Uint8Array, expected: Uint8Array): { maxDiff: number; same
 describe("Volume", () => {
   test("takes 1.5 bytes a voxel, rounding chroma up where a size is odd", () => {
     for (const [frames, height, width] of [[3, 4, 6], [2, 5, 7], [1, 1, 1]]) {
-      const volume = Volume.create(gl, frames, height, width);
+      const volume = Volume.create(gl, { frames, height, width });
       expect([volume.frames, volume.height, volume.width]).toEqual([frames, height, width]);
       expect(volume.planes.map(({ width, height }) => [width, height]))
         .toEqual([[width, height], [half(width), half(height)]]);
       expect(volume.bytes).toBe(yuvBytes(frames, height, width));
       volume.dispose();
     }
-    const volume = Volume.create(gl, 3, 4, 6);
+    const volume = Volume.create(gl, { frames: 3, height: 4, width: 6 });
     expect(volume.bytes / (3 * 4 * 6)).toBe(1.5);
     volume.dispose();
     expect(gl.getError()).toBe(gl.NO_ERROR);
@@ -106,7 +107,7 @@ describe("Volume", () => {
     for (let p = 0; p < pixels.length / 4; p += 3) pixels[4 * p + 3] = 96;  // premultiplying
     const image = new ImageData(new Uint8ClampedArray(pixels), clip.width, clip.height);
     const bitmap = await createImageBitmap(image, { premultiplyAlpha: "none" });
-    const volume = Volume.create(gl, 3, clip.height, clip.width);
+    const volume = Volume.create(gl, { ...clip, frames: 3 });
     for (let round = 0; round < 2; round++) {  // so that no upload comes first
       [pixels, image, bitmap].forEach((source, t) => {
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
@@ -127,25 +128,31 @@ describe("Volume", () => {
 
   test("needs at least one voxel each way, a whole number of them", () => {
     for (const [frames, height, width] of [[0, 2, 2], [2, 0, 2], [2, 2, 0], [2, 1.5, 2]])
-      expect(() => Volume.create(gl, frames, height, width)).toThrow(RangeError);
+      expect(() => Volume.create(gl, { frames, height, width })).toThrow(RangeError);
   });
 
-  test("refuses more frames or pixels than the GPU's limits", () => {
+  test("refuses more frames or pixels than the GPU's limits, keeping what it would free", () => {
     const layers = gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS) as number;
     const size = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
-    const pixels = (width: number, height: number) =>
-      `frames of ${width} × ${height} pixels are more than the GPU's limit of ${size} each way`;
-    const oversize: [number, number, number, string][] = [
-      [layers + 1, 2, 2,
-       `a volume of ${layers + 1} frames is more than the GPU's limit of ${layers}`],
-      [2, size + 1, 2, pixels(2, size + 1)],
-      [2, 2, size + 1, pixels(size + 1, 2)],
+    const free = vi.fn();
+    const frames = (preview: string) => `The GPU can hold at most ${layers} frames, and this `
+      + `clip has ${layers + 1}${preview}. Set a shorter duration.`;
+    const pixels = (width: number, height: number, preview: string) => "The GPU can hold frames "
+      + `at most ${size} pixels across, and this clip's are ${width}×${height}${preview}. Set a `
+      + "smaller scale.";
+    const oversize: [number, number, number, boolean, string][] = [
+      [layers + 1, 2, 2, false, frames("")],
+      [layers + 1, 2, 2, true, frames(" at half its frame rate")],
+      [2, size + 1, 2, false, pixels(2, size + 1, "")],
+      [2, 2, size + 1, true, pixels(size + 1, 2, " at half size")],
     ];
-    for (const [frames, height, width, message] of oversize) {
-      const error = thrown(() => Volume.create(gl, frames, height, width));
-      expect(error).toBeInstanceOf(RangeError);
-      expect((error as Error).message).toBe(message);
+    for (const [frames, height, width, preview, message] of oversize) {
+      const error = thrown(() => Volume.create(gl, { frames, height, width }, { preview, free }));
+      expect(error).toEqual(new Problem(message));
     }
+    expect(free).not.toHaveBeenCalled();
+    Volume.create(gl, { frames: 2, height: 2, width: 2 }, { free }).dispose();
+    expect(free).toHaveBeenCalledOnce();
   });
 
   test("is too large when the GPU can't allocate it", () => {
@@ -154,11 +161,13 @@ describe("Volume", () => {
     onTestFinished(() => own.getExtension("WEBGL_lose_context")?.loseContext());
     const layers = own.getParameter(own.MAX_ARRAY_TEXTURE_LAYERS) as number;
     const size = own.getParameter(own.MAX_TEXTURE_SIZE) as number;
-    const error = thrown(() => Volume.create(own, layers, size, size));
-    expect(error).toBeInstanceOf(VolumeTooLarge);
-    expect((error as VolumeTooLarge).bytes).toBe(yuvBytes(layers, size, size));
-    expect((error as Error).message)
-      .toContain(`${(yuvBytes(layers, size, size) / 1e9).toFixed(2)} GB`);
+    const free = vi.fn();
+    const error = thrown(() => Volume.create(own, { frames: layers, height: size, width: size },
+                                             { free }));
+    expect(error).toEqual(new Problem(
+      `This clip needs ${(yuvBytes(layers, size, size) / 1e9).toFixed(1)} GB of GPU memory, `
+      + "more than the GPU can give it. Set a shorter duration or a smaller scale."));
+    expect(free).toHaveBeenCalledOnce();  // before it tried
     expect(own.isContextLost()).toBe(false);
     expect(own.getError()).toBe(own.NO_ERROR);
   });
