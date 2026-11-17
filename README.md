@@ -271,7 +271,12 @@ decode video. Browsers won't run its scripts from a file opened straight from
 disk. On every push to `main`, `.github/workflows/deploy-pages.yml` runs the
 checks, builds the page and publishes it on GitHub Pages.
 
-`web/app.js` runs the page. The TypeScript in `web/src/` does the work:
+`web/src/page/` runs the page, a module for each part of it: the options
+(`controls.ts`), the live view and its transport (`view.ts`), the videos to
+choose from (`source.ts`), the cuboid (`cuboid.ts`) and the renders
+(`renders.ts`). `main.ts` starts it, `state.ts` holds whether the page can
+work here and the state of the video chosen, and `elements.ts` looks up the
+elements of `index.html` by id. The rest of `web/src/` does the work:
 
 - `decode.ts` reads a clip's frames, `encode.ts` writes a render's.
 - `planner.ts` plans a sweep: the output size and the line through the
@@ -289,7 +294,7 @@ to be installed, and Playwright's Firefox, which `npx playwright install firefox
 installs; `npm run test:unit` runs only those that need no browser. On
 Linux, Firefox needs more to decode H.264 and draw with WebGL: run it as
 `.github/workflows/deploy-pages.yml` does. `npm run typecheck` checks the
-TypeScript, and `web/app.js` from its JSDoc. The expected values in
-`web/test/fixtures/` (the JSON files) were recorded from an earlier reference
-implementation, and nothing can make them afresh: when a change breaks a test
-that reads one, replace it with a test of the behaviour itself.
+TypeScript. The expected values in `web/test/fixtures/` (the JSON files) were
+recorded from an earlier reference implementation, and nothing can make them
+afresh: when a change breaks a test that reads one, replace it with a test of
+the behaviour itself.
