@@ -3,12 +3,12 @@
  * an MP4 by Mediabunny.
  */
 import {
-  EncodedPacket, EncodedVideoPacketSource, Mp4OutputFormat, Output, StreamTarget,
-  type StreamTargetChunk,
+  EncodedPacket, EncodedVideoPacketSource, Mp4OutputFormat, Output, type Target,
 } from "mediabunny";
 import { BT709, markColour } from "./avc";
 import { bind, dataTexture, fill, framebuffer, program, type Program } from "./gpu/gl";
 import { COVER } from "./gpu/shaders";
+import { Problem } from "./options";
 import type { Rate } from "./types";
 
 /** H.264 needs even dimensions, so an odd one gains a black column or row. */
@@ -36,42 +36,6 @@ export function settings(width: number, height: number, fps: Rate, preview: bool
 /** The browser can't encode the video: it has no H.264 encoder for it, or its encoder failed. */
 export class Unencodable extends Error {
   override name = "Unencodable";
-}
-
-/** An encoded video, and how its bitrate was controlled. */
-export interface Encoded { video: Blob; width: number; height: number; rateControl: string }
-
-/**
- * The bytes Mediabunny writes, kept as the parts it wrote them in. A write before the end
- * overwrites what is there, as the muxer does to fill in sizes once it knows them.
- */
-export class Gathered {
-  private readonly parts: { at: number; data: Uint8Array<ArrayBuffer> }[] = [];
-  private end = 0;
-
-  write({ data, position }: StreamTargetChunk): void {
-    let done = 0;  // how much of data is in place
-    for (const part of this.parts) {  // in order, end to end from 0
-      if (done === data.length || position + done >= this.end) break;
-      const from = position + done - part.at;
-      if (from >= part.data.length) continue;
-      const n = Math.min(part.data.length - from, data.length - done);
-      part.data.set(data.subarray(done, done + n), from);
-      done += n;
-    }
-    if (done === data.length) return;
-    if (position + done > this.end) this.append(new Uint8Array(position + done - this.end));
-    this.append(done ? data.slice(done) : data);
-  }
-
-  blob(): Blob {
-    return new Blob(this.parts.map(({ data }) => data), { type: "video/mp4" });
-  }
-
-  private append(data: Uint8Array<ArrayBuffer>): void {
-    this.parts.push({ at: this.end, data });
-    this.end += data.length;
-  }
 }
 
 // Frames go to the encoder in BT.709 at limited range, as HD video is, and the video is marked
@@ -256,15 +220,14 @@ export class Encoder {
   private readonly options: VideoEncoderEncodeOptions;
   private readonly output: Output;
   private readonly source: EncodedVideoPacketSource;
-  private readonly gathered = new Gathered();
   private readonly fps: Rate;
   private muxed: Promise<void> = Promise.resolve();  // the packets handed to the muxer
-  private failure: Unencodable | null = null;
+  private failure: Error | null = null;
   private wake: (() => void) | null = null;  // stops a wait for the encoder
   private frames = 0;
 
   private constructor(gl: WebGL2RenderingContext, fps: Rate, config: VideoEncoderConfig,
-                      quantizer: number | null) {
+                      quantizer: number | null, target: Target) {
     this.fps = fps;
     this.width = config.width;
     this.height = config.height;
@@ -272,11 +235,8 @@ export class Encoder {
     this.rateControl = quantizer === null
       ? `variable bitrate, ${formatBitrate(config.bitrate!)}` : `quantizer ${quantizer}`;
     this.planes = new Planes(gl, config.width, config.height);
-    this.output = new Output({
-      format: new Mp4OutputFormat(),
-      target: new StreamTarget(new WritableStream({ write: (chunk) => this.gathered.write(chunk) }),
-                               { chunked: true }),
-    });
+    // Written as it is muxed, its index last, into a file or memory alike.
+    this.output = new Output({ format: new Mp4OutputFormat({ fastStart: false }), target });
     this.source = new EncodedVideoPacketSource("avc");
     this.output.addVideoTrack(this.source, { frameRate: fps.num / fps.den });
     this.encoder = new VideoEncoder({
@@ -287,13 +247,14 @@ export class Encoder {
   }
 
   /**
-   * An encoder for pictures width × height, at `fps` frames a second. Throws Unencodable if the
-   * browser can't encode frames that size; add and finish throw it if the encoder fails later.
+   * An encoder for pictures width × height, at `fps` frames a second, muxing into `target`.
+   * Throws Unencodable if the browser can't encode frames that size; add and finish throw it if
+   * the encoder fails later, or a Problem the target throws.
    */
   static async open(gl: WebGL2RenderingContext, width: number, height: number, fps: Rate,
-                    settings: Settings): Promise<Encoder> {
+                    settings: Settings, target: Target): Promise<Encoder> {
     const { config, quantizer } = await choose(even(width), even(height), fps, settings);
-    const encoder = new Encoder(gl, fps, config, quantizer);
+    const encoder = new Encoder(gl, fps, config, quantizer, target);
     await encoder.output.start();
     return encoder;
   }
@@ -325,8 +286,8 @@ export class Encoder {
     this.check();
   }
 
-  /** Finish the video. */
-  async finish(): Promise<Encoded> {
+  /** Finish the video, its MP4 written to the target. */
+  async finish(): Promise<void> {
     this.check();
     await this.encoder.flush().catch((error: unknown) => this.fail(error));
     await this.muxed;
@@ -335,8 +296,6 @@ export class Encoder {
     this.source.close();
     await this.output.finalize();
     this.planes.dispose();
-    return { video: this.gathered.blob(), width: this.width, height: this.height,
-             rateControl: this.rateControl };
   }
 
   /** Hand a packet to the muxer, its decoder config marked with the frames' colour. */
@@ -361,10 +320,14 @@ export class Encoder {
       .catch((error: unknown) => this.fail(error));
   }
 
-  /** Note the first failure, of the encoder or the muxer, for check to throw. */
+  /**
+   * Note the first failure, of the encoder or the muxer, for check to throw: a Problem, as the
+   * target throws, as it is.
+   */
   private fail(error: unknown): void {
     const reason = (error instanceof Error ? error.message : String(error)).replace(/\.$/, "");
-    this.failure ??= new Unencodable(`The browser's encoder failed: ${reason}.`, { cause: error });
+    this.failure ??= error instanceof Problem ? error
+      : new Unencodable(`The browser's encoder failed: ${reason}.`, { cause: error });
     this.wake?.();
   }
 

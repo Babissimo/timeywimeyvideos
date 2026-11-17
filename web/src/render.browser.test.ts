@@ -1,9 +1,10 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { server } from "vitest/browser";
 import raw from "../test/fixtures/render.json?raw";
 import { Problem } from "./options";
 import { framesOf, readBack, thumbnail } from "./readback";
 import { render, type Progress, type Rendered } from "./render";
+import { discard, stored } from "./store";
 
 interface Recorded {
   clip: string; values: Record<string, string>; preview: boolean; output: string;
@@ -41,6 +42,24 @@ function watched(): { start: () => Worker; ended: () => boolean } {
 async function failure(promise: Promise<unknown>): Promise<unknown> {
   return promise.then(() => expect.fail("the render was made"), (error: unknown) => error);
 }
+
+/** The names in the origin private file system, where renders are kept. */
+async function names(): Promise<string[]> {
+  const found: string[] = [];
+  for await (const name of (await navigator.storage.getDirectory()).keys()) found.push(name);
+  return found.sort();
+}
+
+// Only this file's tests keep files there, one test at a time.
+afterEach(async () => {
+  vi.restoreAllMocks();
+  const folder = await navigator.storage.getDirectory();
+  // A part stays locked a moment after its worker is ended.
+  await expect.poll(async () => {
+    for (const name of await names()) await folder.removeEntry(name).catch(() => {});
+    return names();
+  }).toEqual([]);
+});
 
 // Firefox's decoders, and Chrome's on Linux, make RGB with libyuv's BT.709 table, whose 2 for
 // Cb's part in blue, not 2.112, takes saturated colours' blue some 10 levels towards grey: once
@@ -145,7 +164,7 @@ describe("render", () => {
     }
   });
 
-  test("stops the worker when cancelled", async () => {
+  test("stops the worker when cancelled, and keeps nothing of the render", async () => {
     const { start, ended } = watched();
     const controller = new AbortController();
     let after = 0;
@@ -160,6 +179,13 @@ describe("render", () => {
     expect(ended()).toBe(true);
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(after).toBe(0);
+
+    // The part it was writing is no render, and goes now its worker has.
+    expect(await names()).toEqual([expect.stringMatching(/\.part$/)]);
+    await expect.poll(async () => {
+      await stored();
+      return names();
+    }).toEqual([]);
   });
 
   test("refuses options before starting a worker", async () => {
@@ -210,5 +236,80 @@ describe("render", () => {
     expect(huge).toBeInstanceOf(Problem);
     expect((huge as Problem).message).toMatch(
       /^This clip needs \d+\.\d GB of GPU memory, .*\. Set a shorter duration or a smaller scale\.$/);
+  });
+});
+
+describe("keeping renders", () => {
+  const preview = (file: File, angle: string, options = {}) =>
+    render(file, { angle }, { preview: true, ...options });
+
+  test("keeps a render in the origin private file system, in place of one of its name",
+       async () => {
+    const file = new File([await clip("h264-30.mp4")], "-take.mp4");  // as no lock is named
+    const first = await preview(file, "30");
+    const again = await preview(file, "30");
+    for (const made of [first, again]) {
+      expect(made.kept).toBe(true);
+      expect(made.video).toBeInstanceOf(File);
+      expect((made.video as File).name).toBe(made.name);
+    }
+    expect(await names()).toEqual([again.name]);
+    expect(await readBack(again.video)).toMatchObject({ frames: again.frames });
+  });
+
+  test("sweeps away only the parts no render holds", async () => {
+    const folder = await navigator.storage.getDirectory();
+    await folder.getFileHandle("held.part", { create: true });
+    await folder.getFileHandle("left.part", { create: true });
+    await navigator.locks.request("held.part", async () => {
+      expect(await stored()).toEqual([]);
+      expect(await names()).toEqual(["held.part"]);
+    });
+    await stored();
+    expect(await names()).toEqual([]);
+  });
+
+  test("lists the renders kept, newest first, until each is discarded", async () => {
+    const file = await clip("h264-30.mp4");
+    const older = await preview(file, "30");
+    const newer = await preview(file, "20");
+    const kept = await stored();
+    expect(kept!.map((f) => f.name)).toEqual([newer.name, older.name]);
+    expect(await readBack(kept![1])).toMatchObject({ frames: older.frames });
+    await discard(newer.name);
+    expect((await stored())!.map((f) => f.name)).toEqual([older.name]);
+  });
+
+  test("keeps one whole video of two renders of the same name made at once", async () => {
+    const file = await clip("h264-30.mp4");
+    const both = await Promise.all([preview(file, "30"), preview(file, "30")]);
+    expect(both.map((made) => made.kept)).toEqual([true, true]);
+    expect(await names()).toEqual([both[0].name]);
+    const [kept] = (await stored())!;
+    const { width, height, frames } = both[0];
+    expect(await readBack(kept)).toMatchObject({ width, height, frames });
+  });
+
+  test("holds a render in memory where the browser keeps no files for the page", async () => {
+    const unkept = () => new Worker(new URL("../test/unkept.worker.ts", import.meta.url),
+                                    { type: "module" });
+    const made = await preview(await clip("h264-30.mp4"), "30", { worker: unkept });
+    expect(made.kept).toBe(false);
+    expect(await readBack(made.video)).toMatchObject({ frames: made.frames });
+    expect(await names()).toEqual([]);
+
+    vi.spyOn(navigator.storage, "getDirectory")
+      .mockRejectedValue(new DOMException("The operation is insecure.", "SecurityError"));
+    expect(await stored()).toBeNull();
+  });
+
+  test("says when the browser has no room left to keep a render", async () => {
+    const full = () => new Worker(new URL("../test/full.worker.ts", import.meta.url),
+                                  { type: "module" });
+    const error = await failure(preview(await clip("h264-30.mp4"), "30", { worker: full }));
+    expect(error).toEqual(new Problem("The browser has no room left to keep this render. "
+                                      + "Remove some renders, or set a shorter duration or a "
+                                      + "smaller scale."));
+    expect(await stored()).toEqual([]);
   });
 });

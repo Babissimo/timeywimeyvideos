@@ -34,9 +34,13 @@ copied.
   options on the page and encode it as H.264 in an MP4, named after the clip
   and the options that differ from the defaults. A render runs on its own
   while you carry on with the page, and can be cancelled. Renders are listed
-  below the player, to watch, download or remove, until you leave or reload
-  the page, which asks first while a render runs or one hasn't been
-  downloaded.
+  below the player, to watch, download or remove. Each is written to the
+  browser's private storage for the page as it is made, and kept there until
+  you remove it (or the browser clears the page's storage, as it may when
+  short of space). Where the browser keeps no files for the page, as in
+  Firefox's private windows, renders are held in memory until you leave or
+  reload the page. Leaving asks first while a render runs, or while one held
+  in memory hasn't been downloaded.
 
 | option | meaning |
 | --- | --- |
@@ -276,7 +280,8 @@ checks, builds the page and publishes it on GitHub Pages.
 - `gpu/` holds the clip on the GPU (`volume.ts`) and slices it there
   (`slicer.ts`, `shaders.ts`).
 - `live.ts` runs the live preview; `render.ts` runs a render in a worker of
-  its own (`render.worker.ts`).
+  its own (`render.worker.ts`), and `store.ts` keeps it in the browser's
+  origin private file system.
 - `sources.ts` lists the videos the page offers.
 
 `npm test` runs the checks, some of them in both Google Chrome, which has

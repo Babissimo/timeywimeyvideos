@@ -10,6 +10,7 @@ import { render as renderClip } from "./src/render.ts";
 import {
   changed, entryFolder, hasChanged, pickedFolder, same, Sources, VIDEO_TYPES,
 } from "./src/sources.ts";
+import { discard, stored } from "./src/store.ts";
 
 /**
  * @import { ClipInfo } from "./src/decode.ts"
@@ -1056,17 +1057,19 @@ function setView(name) {
 new ResizeObserver(() => drawCube()).observe(cube);
 
 // ---------------------------------------------------------------------------
-// Renders, made here one at a time, each in a worker of its own, and kept until
-// the page is left.
+// Renders, made here one at a time, each in a worker of its own. The browser keeps
+// them for the page, or where it keeps no files for it, they last until it is left.
 
 /** @type {AbortController | null} */
 let job = null;     // the AbortController of the render under way
 /**
+ * A render, saved once it is kept in the browser or downloaded.
  * @typedef {{ name: string, url: string, size: number, made: Date, about: string,
  *             saved: boolean }} Render
  * @type {Render[]}
  */
 const renders = [];  // newest first
+let storing = false;  // whether the browser keeps files for the page
 
 // What each stage of a render says, given how many frames it has done.
 /** @type {Record<Stage, (done: number, total: number) => string>} */
@@ -1137,7 +1140,8 @@ $("render-preview").addEventListener("click", () => render(true));
 $("render-full").addEventListener("click", () => render(false));
 $("cancel").addEventListener("click", () => job?.abort());
 
-// Leaving the page loses a render under way and every render not yet downloaded.
+// Leaving the page loses a render under way and every render held in memory and
+// not yet downloaded.
 window.addEventListener("beforeunload", (event) => {
   if (job || renders.some((r) => !r.saved)) event.preventDefault();
 });
@@ -1151,12 +1155,24 @@ function keep(made) {
   if (earlier >= 0) URL.revokeObjectURL(renders.splice(earlier, 1)[0].url);
   const item = {
     name: made.name, url: URL.createObjectURL(made.video), size: made.video.size,
-    made: new Date(), saved: false,
+    made: new Date(), saved: made.kept,
     about: `${made.width}×${made.height}, ${made.frames} frames, ${made.rateControl}`,
   };
   renders.unshift(item);
   showRenders();
   return item;
+}
+
+// List the renders the browser kept from before.
+async function restore() {
+  const files = await stored().catch(() => null);
+  storing = files !== null;
+  for (const file of files ?? []) {
+    if (renders.some((r) => r.name === file.name)) continue;  // made since the page opened
+    renders.push({ name: file.name, url: URL.createObjectURL(file), size: file.size,
+                   made: new Date(file.lastModified), about: "", saved: true });
+  }
+  showRenders();
 }
 
 function showRenders() {
@@ -1169,7 +1185,9 @@ function showRenders() {
     name.classList.add("name");
     const meta = document.createElement("span");
     meta.className = "note";
-    meta.textContent = `${bytes(r.size)} · ${r.made.toLocaleTimeString()} · ${r.about}`;
+    const when = r.made.toDateString() === new Date().toDateString()
+      ? r.made.toLocaleTimeString() : r.made.toLocaleString();
+    meta.textContent = [bytes(r.size), when, r.about].filter(Boolean).join(" · ");
     const download = document.createElement("a");
     download.href = r.url;
     download.download = r.name;
@@ -1183,8 +1201,10 @@ function showRenders() {
   if (!renders.length) {
     const item = document.createElement("li");
     item.className = "note";
-    item.textContent = "Nothing rendered yet. Renders stay here until you leave or reload " +
-      "the page, so download the ones to keep.";
+    item.textContent = storing
+      ? "Nothing rendered yet. Renders are kept in this browser until you remove them."
+      : "Nothing rendered yet. Renders stay here until you leave or reload the page, so " +
+        "download the ones to keep.";
     list.append(item);
   }
   markPlaying();
@@ -1196,6 +1216,7 @@ function showRenders() {
  */
 function forget(r) {
   renders.splice(renders.indexOf(r), 1);
+  discard(r.name);
   if ($("player").src === r.url) {
     $("player").removeAttribute("src");
     $("player").load();
@@ -1255,7 +1276,7 @@ function start() {
   $("unserved").remove();  // the note for when this script can't run
   slicesChanged();
   noiseChanged();
-  showRenders();
+  restore();
   showSources();
   enableRender();  // as Firefox may keep a button's state from before a reload
   showMessage(UNABLE || NO_SOURCE);
