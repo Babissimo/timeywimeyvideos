@@ -15,17 +15,19 @@ import {
 } from "./options";
 import { PREVIEW_SCALE } from "./planner";
 import { gcd, limitDenominator } from "./numbers";
+import { destination } from "./store";
 import type { Rate } from "./types";
 
-/** What the page asks for: a render of a clip with the page's options. */
-export interface RenderRequest { file: Blob; values: OptionValues; preview: boolean }
+/** What the page asks for: a render of a clip with the page's options, and its file name. */
+export interface RenderRequest { file: Blob; values: OptionValues; preview: boolean; name: string }
 
 /** What the worker is doing: decoding the clip, slicing and encoding, or finishing the file. */
 export type Stage = "loading" | "slicing" | "finishing";
 
-/** A finished render. */
+/** A finished render, and whether its video is kept in the origin private file system. */
 export interface Made {
-  video: Blob; width: number; height: number; frames: number; fps: Rate; rateControl: string;
+  video: Blob; kept: boolean; width: number; height: number; frames: number; fps: Rate;
+  rateControl: string;
 }
 
 /** What the worker says: how far it has got, then the video, or why it failed. */
@@ -52,7 +54,7 @@ function times(a: Rate, b: Rate): Rate {
   return { num: num / divisor, den: den / divisor };
 }
 
-async function run({ file, values, preview }: RenderRequest,
+async function run({ file, values, preview, name }: RenderRequest,
                    progress: (stage: Stage, done: number, total: number) => void): Promise<Made> {
   const opts = readOptions(values);
   const shrink = preview ? PREVIEW_SCALE : 1;
@@ -81,6 +83,7 @@ async function run({ file, values, preview }: RenderRequest,
   if (!gl) throw new Problem("The browser won't give this render a WebGL2 context.");
   try {
     // Everything the GPU and encoder need is made before the clip is decoded.
+    const out = await destination();
     const slicer = new Slicer(gl);
     if (width > slicer.maxSize || height > slicer.maxSize) {
       throw new Problem(`The GPU can't make frames ${width}×${height}, as this render's `
@@ -88,7 +91,7 @@ async function run({ file, values, preview }: RenderRequest,
     }
     const volume = Volume.create(gl, planned, { preview });
     const encoder = await Encoder.open(gl, width, height, fps,
-                                       settings(width, height, fps, preview));
+                                       settings(width, height, fps, preview), out.target);
     await volume.decode(file, options, (done, total) => progress("loading", done, total));
 
     const surface = noise && looping(noise, sweep);
@@ -105,9 +108,10 @@ async function run({ file, values, preview }: RenderRequest,
     slicer.dispose();
     volume.dispose();
     progress("finishing", sweep.frames, sweep.frames);
-    const { video, width: codedWidth, height: codedHeight, rateControl } = await encoder.finish();
-    return { video, width: codedWidth, height: codedHeight, frames: sweep.frames, fps,
-             rateControl };
+    await encoder.finish();
+    const { video, kept } = await out.finish(name);
+    return { video, kept, width: encoder.width, height: encoder.height, frames: sweep.frames,
+             fps, rateControl: encoder.rateControl };
   } catch (error) {
     // A lost context shows first as whatever fails, such as a shader that won't compile.
     if (gl.isContextLost() && !(error instanceof Problem)) throw new Problem(LOST);

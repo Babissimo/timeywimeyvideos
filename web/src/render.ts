@@ -55,7 +55,7 @@ export async function render(file: File, values: OptionValues,
       thread.addEventListener("error", (event) => {
         reject(new Problem(`The render failed: ${event.message || "its worker stopped"}`));
       });
-      thread.postMessage({ file, values, preview } satisfies RenderRequest);
+      thread.postMessage({ file, values, preview, name } satisfies RenderRequest);
     });
   } finally {
     thread.terminate();
@@ -74,7 +74,8 @@ function stem(name: string): string {
  * that differs from the page's defaults.
  */
 export function outputName(name: string, opts: Options, preview: boolean): string {
-  const parts = [stem(name), opts.slice, `${opts.angle}deg`];
+  // Chrome's origin private file system takes no backslash in a file name.
+  const parts = [stem(name).replaceAll("\\", "_"), opts.slice, `${opts.angle}deg`];
   if (opts.inside) parts.push("inside");
   if (opts.motion) parts.push(opts.motion);
   if (opts.loop) {

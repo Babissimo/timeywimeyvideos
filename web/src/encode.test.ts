@@ -1,32 +1,5 @@
-import { describe, expect, test } from "vitest";
-import { codecString, even, Gathered } from "./encode";
-
-const bytes = (...values: number[]) => new Uint8Array(values);
-
-async function gathered(writes: [number, number[]][]): Promise<number[]> {
-  const out = new Gathered();
-  for (const [position, data] of writes)
-    out.write({ type: "write", data: bytes(...data), position });
-  const blob = out.blob();
-  expect(blob.type).toBe("video/mp4");
-  return [...new Uint8Array(await blob.arrayBuffer())];
-}
-
-describe("Gathered", () => {
-  test("appends writes at the end", async () => {
-    expect(await gathered([[0, [1, 2]], [2, [3]], [3, [4, 5, 6]]])).toEqual([1, 2, 3, 4, 5, 6]);
-  });
-
-  test("overwrites what is there, across parts, and runs on past the end", async () => {
-    expect(await gathered([[0, [1, 2, 3]], [3, [4, 5]], [1, [9, 9]]])).toEqual([1, 9, 9, 4, 5]);
-    expect(await gathered([[0, [1, 2, 3]], [3, [4, 5]], [2, [7, 8, 9]]])).toEqual([1, 2, 7, 8, 9]);
-    expect(await gathered([[0, [1, 2]], [2, [3, 4]], [3, [7, 8, 9]]])).toEqual([1, 2, 3, 7, 8, 9]);
-  });
-
-  test("fills a gap before a write past the end with zeros", async () => {
-    expect(await gathered([[0, [1]], [3, [4]]])).toEqual([1, 0, 0, 4]);
-  });
-});
+import { expect, test } from "vitest";
+import { codecString, even } from "./encode";
 
 test("even rounds up to an even size", () => {
   expect([1, 2, 33, 34].map(even)).toEqual([2, 2, 34, 34]);

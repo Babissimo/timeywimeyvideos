@@ -1,3 +1,4 @@
+import { BufferTarget } from "mediabunny";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { server } from "vitest/browser";
 import { codecString, Encoder, settings, Unencodable } from "./encode";
@@ -26,14 +27,18 @@ function picture(gl: WebGL2RenderingContext, width: number, height: number,
 async function encode(width: number, height: number, fps: Rate, n: number,
                       preview = false) {
   const gl = context();
+  const target = new BufferTarget();
   const encoder = await Encoder.open(gl, width, height, fps,
-                                     settings(width, height, fps, preview));
+                                     settings(width, height, fps, preview), target);
   for (let i = 0; i < n; i++) {
     const colour = COLOURS[i % COLOURS.length];
     await encoder.add(picture(gl, width, height, (x, y) =>
       x >= width >> 1 && y >= height >> 1 ? [255, 255, 255] : colour));
   }
-  return encoder.finish();
+  await encoder.finish();
+  const { width: codedWidth, height: codedHeight, rateControl } = encoder;
+  return { video: new Blob([target.buffer!]), width: codedWidth, height: codedHeight,
+           rateControl };
 }
 
 /** The mean colour of a frame's pixels in columns x0 to x1 and rows y0 to y1. */
@@ -92,7 +97,7 @@ describe("Encoder", () => {
     const fps = { num: 30, den: 1 };
     const gl = context();
     const encoder = await Encoder.open(gl, width, height, fps,
-                                       settings(width, height, fps, false));
+                                       settings(width, height, fps, false), new BufferTarget());
     // A magenta bar down columns 8 to 11.
     await encoder.add(picture(gl, width, height,
                               (x) => x >= 8 && x < 12 ? [255, 0, 255] : [0, 0, 0]));
@@ -160,21 +165,24 @@ describe("Encoder", () => {
 
   test("refuses frames the browser can't encode", async () => {
     const fps = { num: 30, den: 1 };
-    await expect(Encoder.open(context(), 30000, 16, fps, settings(30000, 16, fps, false)))
+    await expect(Encoder.open(context(), 30000, 16, fps, settings(30000, 16, fps, false),
+                              new BufferTarget()))
       .rejects.toThrow(new Unencodable("The browser can't encode video 30000×16."));
   });
 
   test("says when the browser can't encode H.264 at all", async () => {
     vi.spyOn(VideoEncoder, "isConfigSupported").mockResolvedValue({ supported: false });
     const fps = { num: 30, den: 1 };
-    await expect(Encoder.open(context(), 64, 48, fps, settings(64, 48, fps, false)))
+    await expect(Encoder.open(context(), 64, 48, fps, settings(64, 48, fps, false),
+                              new BufferTarget()))
       .rejects.toThrow(new Unencodable("The browser can't encode H.264 video."));
   });
 
   test("says when the encoder fails partway", async () => {
     const fps = { num: 30, den: 1 };
     const gl = context();
-    const encoder = await Encoder.open(gl, 64, 48, fps, settings(64, 48, fps, false));
+    const encoder = await Encoder.open(gl, 64, 48, fps, settings(64, 48, fps, false),
+                                       new BufferTarget());
     const grey = picture(gl, 64, 48, () => [128, 128, 128]);
     await encoder.add(grey);
     vi.spyOn(VideoEncoder.prototype, "encode").mockImplementation(() => {

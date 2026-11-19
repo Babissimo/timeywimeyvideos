@@ -12,6 +12,7 @@ test("names a render after its clip and the options that differ from the default
     .toBe("a.b_shear_-30.5deg_inside.mp4");
   expect(named("my clip's", { angle: "80", inside: "1", motion: "perpendicular" }))
     .toBe("my clip's_rotate_80deg_inside_perpendicular.mp4");
+  expect(named("a\\b.mp4", {})).toBe("a_b_rotate_45deg.mp4");
   expect(named(".hidden.mp4", { loop: "1", loop_fade: "0.25", loop_sides: "1", motion: "time",
                                 loop_side_fade: "12" }))
     .toBe(".hidden_rotate_45deg_time_loop_loopfade0.25s_sides_sidefade12px.mp4");
