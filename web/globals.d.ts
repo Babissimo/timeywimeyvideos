@@ -1,4 +1,4 @@
-// What app.js uses of the File System Access API, which Chrome and Edge have and TypeScript's
+// What the page uses of the File System Access API, which Chrome and Edge have and TypeScript's
 // DOM types leave out.
 
 interface Window {

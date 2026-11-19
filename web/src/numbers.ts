@@ -20,6 +20,21 @@ export function decimal(x: number, digits = 6): string {
   return String(Number(x.toPrecision(digits)));
 }
 
+/** A duration as the page writes it: tenths of a second under a minute, then minutes:seconds. */
+export function seconds(s: number): string {
+  const tenths = s.toFixed(1);
+  if (Number(tenths) < 60) return `${tenths} s`;
+  const whole = Math.round(s);  // rounded first, or 119.6 s would read 1:60
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+/** A size in bytes as the page writes it, in KB, MB or GB. */
+export function bytes(n: number): string {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(2)} GB`;
+  if (n >= 1e6) return `${Math.round(n / 1e6)} MB`;
+  return `${Math.max(1, Math.round(n / 1e3))} KB`;
+}
+
 /** x to the nearest integer, halves to even, and never -0. */
 export function roundHalfEven(x: number): number {
   if (!Number.isFinite(x)) return x;
