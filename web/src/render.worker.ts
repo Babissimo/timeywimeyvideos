@@ -5,10 +5,10 @@
  * it in x, y and time and copies the nearest. The page ends the worker once it reports, or to
  * cancel, and its GPU memory and encoder go with it.
  */
-import { load, planLoad, VideoError, type LoadOptions } from "./decode";
+import { planLoad, VideoError, type LoadOptions } from "./decode";
 import { Encoder, even, settings, Unencodable } from "./encode";
 import { Slicer } from "./gpu/slicer";
-import { Volume, VolumeTooLarge } from "./gpu/volume";
+import { LOST, Volume } from "./gpu/volume";
 import { looping } from "./noise";
 import {
   planFaded, Problem, readOptions, type OptionValues, type ProblemKind,
@@ -34,8 +34,6 @@ export type RenderMessage =
   | ({ type: "done" } & Made)
   | { type: "failed"; kind: ProblemKind; message: string };
 
-const LOST = "The GPU gave out, perhaps for want of memory.";
-
 function post(message: RenderMessage): void {
   self.postMessage(message);
 }
@@ -52,31 +50,6 @@ function times(a: Rate, b: Rate): Rate {
   const [num, den] = [a.num * b.num, a.den * b.den];
   const divisor = gcd(num, den) || 1;
   return { num: num / divisor, den: den / divisor };
-}
-
-/** A volume for the clip, frames × height × width, or the Problem of a GPU that can't hold it. */
-function allocate(gl: WebGL2RenderingContext, frames: number, height: number, width: number,
-                  preview: boolean): Volume {
-  if (gl.isContextLost()) throw new Problem(LOST);  // its limits would read as 0
-  const layers = gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS) as number;
-  const size = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
-  if (frames > layers) {
-    throw new Problem(`The GPU can hold at most ${layers} frames, and this clip has `
-                      + `${frames}${preview ? " at half its frame rate" : ""}. Set a shorter `
-                      + "duration.");
-  }
-  if (width > size || height > size) {
-    throw new Problem(`The GPU can hold frames at most ${size} pixels across, and this clip's `
-                      + `are ${width}×${height}${preview ? " at half size" : ""}. Set a smaller `
-                      + "scale.");
-  }
-  try {
-    return Volume.create(gl, frames, height, width);
-  } catch (error) {
-    if (!(error instanceof VolumeTooLarge)) throw error;
-    throw new Problem(`This clip needs ${(error.bytes / 1e9).toFixed(1)} GB of GPU memory, more `
-                      + "than the GPU can give it. Set a shorter duration or a smaller scale.");
-  }
 }
 
 async function run({ file, values, preview }: RenderRequest,
@@ -113,14 +86,10 @@ async function run({ file, values, preview }: RenderRequest,
       throw new Problem(`The GPU can't make frames ${width}×${height}, as this render's `
                         + "are. Set a smaller angle, a shorter duration or a smaller scale.");
     }
-    const volume = allocate(gl, planned.frames, height, planned.width, preview);
+    const volume = Volume.create(gl, planned, { preview });
     const encoder = await Encoder.open(gl, width, height, fps,
                                        settings(width, height, fps, preview));
-    await load(file, options, (i, frame) => {
-      volume.upload(i, frame);
-      frame.close();
-      if (gl.isContextLost()) throw new Problem(LOST);
-    }, (done, total) => progress("loading", done, total));
+    await volume.decode(file, options, (done, total) => progress("loading", done, total));
 
     const surface = noise && looping(noise, sweep);
     const bend = surface && { surface, push: surface.push(sweep.normal) };

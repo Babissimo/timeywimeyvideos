@@ -58,7 +58,7 @@ export function rgba(clip: Clip, t: number): Uint8Array {
 
 /** A volume holding the clip. */
 export function upload(gl: WebGL2RenderingContext, clip: Clip): Volume {
-  const volume = Volume.create(gl, clip.frames, clip.height, clip.width);
+  const volume = Volume.create(gl, clip);
   for (let t = 0; t < clip.frames; t++) volume.upload(t, rgba(clip, t));
   return volume;
 }
