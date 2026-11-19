@@ -30,9 +30,11 @@ export function seconds(s: number): string {
 
 /** A size in bytes as the page writes it, in KB, MB or GB. */
 export function bytes(n: number): string {
-  if (n >= 1e9) return `${(n / 1e9).toFixed(2)} GB`;
-  if (n >= 1e6) return `${Math.round(n / 1e6)} MB`;
-  return `${Math.max(1, Math.round(n / 1e3))} KB`;
+  const kb = Math.round(n / 1e3);  // a unit is chosen by its rounded figure, or 999.6 KB would read 1000 KB
+  if (kb < 1000) return `${Math.max(1, kb)} KB`;
+  const mb = Math.round(n / 1e6);
+  if (mb < 1000) return `${mb} MB`;
+  return `${(n / 1e9).toFixed(2)} GB`;
 }
 
 /** x to the nearest integer, halves to even, and never -0. */
