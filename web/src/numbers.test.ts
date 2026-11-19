@@ -26,6 +26,11 @@ test("bytes writes a size in KB, MB or GB", () => {
     .toEqual(["1 KB", "1 KB", "640 KB", "346 MB", "1.00 GB", "1.23 GB"]);
 });
 
+test("bytes moves up a unit when a size rounds to 1000 of the one below", () => {
+  expect([999_499, 999_500, 999_600, 999.4e6, 999.5e6].map(bytes))
+    .toEqual(["999 KB", "1 MB", "1 MB", "999 MB", "1.00 GB"]);
+});
+
 test("roundHalfEven", () => {
   expect([0.5, 1.5, 2.5, -0.5, -1.5, 2.4, 2.6].map(roundHalfEven))
     .toEqual([0, 2, 2, 0, -2, 2, 3]);
