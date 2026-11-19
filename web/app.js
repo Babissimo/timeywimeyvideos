@@ -1006,23 +1006,37 @@ function drawCube() {
   }
 }
 
-/** @type {{ x: number, y: number, yaw: number, pitch: number } | null} */
+/** @type {{ id: number, x: number, y: number, yaw: number, pitch: number } | null} */
 let drag = null;
 cube.addEventListener("pointerdown", (e) => {
-  drag = { x: e.clientX, y: e.clientY, yaw: camera.yaw, pitch: camera.pitch };
+  if (!e.isPrimary) return;  // a second finger leaves the turn to the first
+  drag = { id: e.pointerId, x: e.clientX, y: e.clientY, yaw: camera.yaw, pitch: camera.pitch };
   cube.setPointerCapture(e.pointerId);
 });
 cube.addEventListener("pointermove", (e) => {
-  if (!drag) return;
+  if (drag?.id !== e.pointerId) return;
   camera.yaw = drag.yaw + (e.clientX - drag.x) * 0.01;
   camera.pitch = Math.min(Math.max(drag.pitch - (e.clientY - drag.y) * 0.01,
                                    -Math.PI / 2), Math.PI / 2);
   drawCube();
 });
-for (const end of ["pointerup", "pointercancel"]) cube.addEventListener(end, () => { drag = null; });
+// A cancelled drag, as when the browser takes a touch to scroll the page, puts the cuboid back.
+cube.addEventListener("pointercancel", (e) => {
+  if (drag?.id !== e.pointerId) return;
+  [camera.yaw, camera.pitch] = [drag.yaw, drag.pitch];
+  drag = null;
+  drawCube();
+});
+/** @param {PointerEvent} e */
+const release = (e) => { if (drag?.id === e.pointerId) drag = null; };
+cube.addEventListener("pointerup", release);
+cube.addEventListener("lostpointercapture", release);
 cube.addEventListener("wheel", (e) => {
+  if (!e.ctrlKey && !e.metaKey) return;  // a plain wheel scrolls the page; a pinch sets ctrlKey
   e.preventDefault();
-  camera.zoom = Math.min(Math.max(camera.zoom * Math.exp(-e.deltaY * 0.0015), 0.3), 10);
+  // A pinch's deltas add up to -100 ln(its scale); a mouse wheel's notch, often 100, is cut to 25.
+  const delta = Math.min(Math.max(e.deltaY, -25), 25);
+  camera.zoom = Math.min(Math.max(camera.zoom * Math.exp(-delta / 100), 0.3), 10);
   drawCube();
 }, { passive: false });
 cube.addEventListener("dblclick", () => setView("three"));
