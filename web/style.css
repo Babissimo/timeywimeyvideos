@@ -241,6 +241,22 @@ video { display: block; width: 100%; max-height: 70vh; background: #000; border-
   #views { grid-template-columns: minmax(0, 1fr); }
 }
 
+/* One column in the order of use: the preview straight after the source, the cuboid after the
+   controls it draws, and Render just above the renders. The DOM keeps the wide layout's order,
+   which its two independent columns need, so Tab and screen readers follow that order here. */
 @media (max-width: 760px) {
-  main { grid-template-columns: minmax(0, 1fr); padding: 12px 16px; }
+  main {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "source" "live" "slice" "noise" "cube" "clip" "render" "renders";
+    padding: 12px 16px;
+  }
+  aside, #views { display: contents; }
+  #source-card { grid-area: source; }
+  #live-card { grid-area: live; }
+  #slice-card { grid-area: slice; }
+  #noise-card { grid-area: noise; }
+  #cube-card { grid-area: cube; }
+  #clip-card { grid-area: clip; }
+  #render-card { grid-area: render; }
+  #renders-card { grid-area: renders; }
 }
